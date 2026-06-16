@@ -1,145 +1,196 @@
-# 02. 20 パターンの検討 と 有力 5 案への絞り込み
+# 02. 設計判断 — 悩みどころの数パターン比較
 
-[01-research-and-domain.md](./01-research-and-domain.md) で定義した 5 設計軸（S/A/C/T/G）+ 補助軸の選択肢を
-組み合わせて、整合的なスキーマ案を 20 個構成する。各案を 7 基準で採点し、5 案に絞り込む。
+[01章](./01-research-and-domain.md) のドメイン知識・参照モデル調査・RDBMS パターンを踏まえ、**設計が割れる判断点**を
+2〜3 パターンずつ比較し採否を決める。確定 DDL/ER は [03章](./03-finalists.md)、全体 ER は [05章](./05-er-diagram.md)。
 
-軸の凡例（詳細は 01 章）:
-- **S**（空間）: S1 隣接 / S2 ltree / S3 閉包 / S4 固定レベル / S5 ハイブリッド
-- **A**（機器）: A1 JSONB / A2 CTI / A3 DeviceType分離 / A4 A3+CTI / A5 A3+JSONB
-- **C**（配線）: C1 汎用1本 / C2 電力ネット分離 / C3 種別別+Cable実体 / C4 軽量有向エッジ / C5 エッジ+再帰+cache
-- **T**（時系列）: T1 Narrow+series / T2 Wide / T3 種別別hypertable / T4 JSONB
-- **G**（集約）: G1 オンザフライ / G2 CAGG+JOIN / G3 非正規化キー+階層CAGG / G4 batch job / G5 Type-2時系列配置
+> **基本姿勢**: データセンターの実体モデルを関係的に持ち、分類は参照表 FK で添える。Haystack/Brick は*発想の参考*に留め、
+> メタモデル（万能 def / 多重継承 DAG /「何でも指せる」ref）は持ち込まない。
+>
+> **表記方針**: 各案の構造は **Mermaid ER 図**で示す（属性は1属性1行）。CHECK 等の明示が要る所だけ SQL を併記。
+> 評価軸: **D=ドメイン制約の強さ / F=可変性 / P=ポータビリティ（LCD・[09章](./09-portability.md)）/ C=実装運用コスト**。
 
----
-
-## 1. 20 パターン一覧
-
-各パターンは「軸の組み合わせ + 性格 + 想定適合シナリオ」で定義する。
-
-| # | 名称 | S | A | C | T | G | 性格 / 想定シナリオ |
-|---|------|---|---|---|---|---|------|
-| **P01** | 素朴フラット（基準線） | S1 | A1(NULL多用) | C1 | T2 | G1 | アンチパターン基準。最小実装だが制約・拡張・性能すべて弱い |
-| **P02** | JSONB 軽量 MVP | S2 | A1 | C2 | T1 | G1 | 可変性最大・実装最小。小規模 DC / PoC / 単一テナント立ち上げ |
-| **P03** | 固定レベル厳格 | S4 | A2 | C2 | T3 | G1 | 制約最強だが階層固定。構成が画一な単一事業者 |
-| **P04** | NetBox 忠実（強整合） | S5 | A4 | C3 | T1 | G3 | 制約最優先・実績重視。機器種別が安定した大規模単一運用者 |
-| **P05** | パッケージ標準 ★本命 | S5 | A5 | C3 | T1 | G3 | 可変性と制約のバランス最良。多数 DC へ横展開する標準パッケージ |
-| **P06** | 閉包テーブル読み最適化 | S3 | A3 | C3 | T1 | G3 | 階層クエリ最速。深い階層・読み支配・多数同時ダッシュボード |
-| **P07** | 隣接純 + path cache | S1 | A3 | C5 | T1 | G4 | 真実源は最小、参照は cache。書き整合性重視・集約は batch |
-| **P08** | 時間軸正確 Temporal | S5 | A5 | C3 | T1 | G5 | 機器移設の履歴を valid_from/to で正確保持。電力課金・エネルギー会計 |
-| **P09** | グラフ中心 | S2 | A3 | C5 | T1 | G1 | 配線トレース第一級。複雑な相互接続・依存解析重視 |
-| **P10** | Wide テレメトリ | S5 | A5 | C3 | T2 | G3 | 計測項目が固定・少数。ダッシュボードで多項目同時表示が支配的 |
-| **P11** | 種別別 hypertable | S5 | A4 | C3 | T3 | G3 | 物理量が少数固定。電力/温度を別 hypertable で個別最適化 |
-| **P12** | EAV 柔軟（アンチ） | S1 | EAV | C1 | T4 | G1 | アンチパターン参照。JSONB の下位互換と確認するための対照 |
-| **P13** | 汎用接続グラフ | S5 | A5 | C1 | T1 | G3 | 配線を 1 本の汎用エッジで。実装簡潔だが誤配線を DB で防げない |
-| **P14** | 電力ネット完全分離 | S5 | A4 | C2 | T1 | G3 | 電力とネットを別テーブル群に。各ドメインに最適化した制約 |
-| **P15** | 軽量有向エッジ | S5 | A5 | C4 | T1 | G3 | ケーブル実体を持たず両端 1 行。ループ/向きを CHECK で表現 |
-| **P16** | テレメトリ非正規化重視 | S5 | A5 | C3 | T1(空間キー埋込) | G3 | measurement に rack/room を埋込み JOIN レス集約。書込時にマッピング解決 |
-| **P17** | 閉包 + JSONB | S3 | A5 | C3 | T1 | G3 | P06 の機器マスタを JSONB ハイブリッド化。読み速度 + 可変性 |
-| **P18** | 固定レベル + DeviceType | S4 | A3 | C3 | T1 | G3 | 階層は固定で制約強、機器は型番分離で可変。中庸 |
-| **P19** | batch job 集約駆動 | S5 | A5 | C3 | T1 | G4 | 集約を analytics-batch 相当で実装。複雑な集約ロジック自由度優先 |
-| **P20** | PG 継承（アンチ） | S1 | A6(INHERITS) | C2 | T1 | G1 | アンチパターン参照。INHERITS が UNIQUE/FK を継承せず制約破綻 |
+| # | 判断点 | 採用 |
+|---|--------|------|
+| B | 点の定義 | **B2 フラット `metric` カタログ**（3軸 point_type を廃止） |
+| C | 電力/冷却の表現 | **C3 物理＝真実源 + 導出フロー**（並行グラフを持たない） |
+| D | 機器種別の階層 | **D1 親参照ツリー**（DAG はオプション） |
+| E | スコープ参照 | **E2 排他アーク FK**（多態キーを廃止） |
+| F | 冗長構成 | **F2 `redundancy_group` + member**（意図を一級に） |
 
 ---
 
-## 2. 評価基準
-
-パッケージ DCIM のゴール（可変性 × 制約厳格）を軸に 7 基準。各 5 点満点。`実装/運用コスト`は
-**低コストほど高得点**（5=軽い）に正規化。
-
-| 基準 | 説明 |
-|------|------|
-| **F. 汎用性/可変性** | 多数の DC に横展開できるか。新機種・新メトリック・階層差を DDL 変更なく吸収できるか |
-| **D. ドメイン制約強度** | 誤データ（U 重なり・誤配線・冗長違反・容量超過）を DB レベルで弾けるか |
-| **R. 読み性能** | 階層集約・トレース・最新値・履歴取得の速さ |
-| **W. 書き性能/取込** | 高頻度テレメトリ取込・構成変更の書込効率 |
-| **TS. TimescaleDB 整合** | hypertable / CAGG / 圧縮 / retention との噛み合わせ・集約の正確性 |
-| **H. 履歴正確性** | 機器移設・構成変更をまたいだ過去集計（エネルギー会計）の正確さ |
-| **C. 実装/運用コスト** | 低コスト＝高得点。テーブル数・トリガ・cache 同期・移行容易性 |
+> **判断 A（長尾属性/カスタム属性の格納）は廃止** — カスタム属性層（旧 `tag_def`/`entity_tag`）は初盤のスコープ外とし不採用。
+> 必要になれば、関係的スーパータイプ（共通基底表への FK）で整合を保ったまま後付けする（型なし多態 `type`+`id` は採らない）。
 
 ---
 
-## 3. 比較マトリクス
+## 判断 B — 点の定義（最重要の簡素化）
 
-| # | 名称 | F | D | R | W | TS | H | C | 合計 |
-|---|------|---|---|---|---|----|---|---|------|
-| P01 | 素朴フラット | 1 | 1 | 2 | 3 | 1 | 1 | 5 | **14** |
-| P02 | JSONB 軽量 MVP | 5 | 2 | 3 | 4 | 4 | 2 | 5 | **25** |
-| P03 | 固定レベル厳格 | 1 | 5 | 4 | 3 | 3 | 2 | 3 | **21** |
-| P04 | NetBox 忠実（強整合） | 4 | 5 | 4 | 4 | 4 | 3 | 2 | **26** |
-| **P05** | **パッケージ標準 ★** | 5 | 4 | 4 | 4 | 5 | 3 | 4 | **29** |
-| P06 | 閉包読み最適化 | 4 | 4 | 5 | 3 | 4 | 3 | 3 | **26** |
-| P07 | 隣接純 + path cache | 4 | 3 | 4 | 3 | 4 | 2 | 3 | **23** |
-| P08 | 時間軸正確 Temporal | 4 | 4 | 3 | 3 | 5 | 5 | 3 | **27** |
-| P09 | グラフ中心 | 4 | 3 | 4 | 3 | 4 | 2 | 3 | **23** |
-| P10 | Wide テレメトリ | 3 | 4 | 4 | 3 | 2 | 3 | 3 | **22** |
-| P11 | 種別別 hypertable | 2 | 4 | 4 | 4 | 3 | 3 | 3 | **23** |
-| P12 | EAV 柔軟（アンチ） | 4 | 1 | 1 | 2 | 2 | 1 | 2 | **13** |
-| P13 | 汎用接続グラフ | 4 | 2 | 4 | 4 | 4 | 3 | 4 | **25** |
-| P14 | 電力ネット完全分離 | 3 | 5 | 4 | 4 | 4 | 3 | 3 | **26** |
-| P15 | 軽量有向エッジ | 4 | 4 | 4 | 4 | 4 | 3 | 4 | **27** |
-| P16 | テレメトリ非正規化重視 | 4 | 3 | 5 | 3 | 5 | 4 | 3 | **27** |
-| P17 | 閉包 + JSONB | 5 | 3 | 5 | 4 | 4 | 3 | 3 | **27** |
-| P18 | 固定レベル + DeviceType | 2 | 5 | 4 | 4 | 4 | 3 | 3 | **25** |
-| P19 | batch job 集約駆動 | 4 | 4 | 4 | 4 | 3 | 4 | 2 | **25** |
-| P20 | PG 継承（アンチ） | 2 | 1 | 3 | 3 | 4 | 2 | 3 | **18** |
+「何を測るか」をどうモデル化するか。Haystack 流の3軸合成（機能×量×主体）か、フラットなカタログか。
 
-採点の根拠（要点）:
-- **可変性 F** はパッケージの最重要基準。`JSONB`/`DeviceType 分離`/`Narrow テレメトリ` が効く（P02/P05/P17 が高い）。`固定レベル S4` と `Wide T2` は減点（P03/P10/P18）。
-- **制約 D** は `固定レベル S4`・`電力ネット分離 C2`・`CTI A4` が最強（P03/P14/P04）。`汎用接続 C1`・`EAV`・`INHERITS` は最弱（P13/P12/P20）。
-- **TS** は `Narrow T1` + `非正規化キー + 階層 CAGG G3` が満点（P05/P16）。`Wide T2`・`JSONB T4` は CAGG/圧縮と相性悪く減点（P10/P12）。
-- **履歴 H** は `Type-2 G5` が突出（P08）。`非正規化キー G3/G4` は ingest 時点固定で実質 Type-2 相当（P16/P19）。`CAGG+JOIN G2` は次元変更を追わず罠（不採用方向）。
+### B1. 3軸 point_type カタログ（却下）
 
----
+`point_type(func, quantity_id, phenom_id, duct, unit_id, ...)` の組合せ表。
 
-## 4. 有力 5 案の選定
-
-合計点上位かつ「**設計空間を代表する多様性**」を持つよう 5 案を選ぶ（単純上位 5 でなく、適合シナリオの被りを避ける）。
-
-### 選定結果
-
-| 順位 | 案 | 合計 | 選定理由 | 適合シナリオ |
-|------|----|----|---------|-----------|
-| **1** | **P05 パッケージ標準** | 29 | 全基準で高水準、可変性×制約×TS 整合のバランス最良 | **多数 DC へ横展開する標準パッケージ（既定の推奨）** |
-| **2** | **P08 時間軸正確 Temporal** | 27 | 履歴正確性で唯一の満点。電力課金の信頼性 | エネルギー会計・コロケーション再課金が最重要 |
-| **3** | **P06 閉包テーブル読み最適化** | 26 | 階層クエリ最速（再帰不要 JOIN）。読み満点 | 深い階層・読み支配・多数同時ダッシュボード |
-| **4** | **P04 NetBox 忠実（強整合）** | 26 | 制約満点・OSS 実績・devicetype-library 流用 | 機器種別が安定した大規模単一運用者、整合性最優先 |
-| **5** | **P02 JSONB 軽量 MVP** | 25 | 可変性満点・実装最小・移行容易 | 小規模 DC / PoC / 短期立ち上げ / 単一テナント |
-
-> P15（軽量有向エッジ, 27）/ P16（テレメトリ非正規化, 27）/ P17（閉包+JSONB, 27）も高得点だが、
-> **P15 は P05 の配線軸を C4 に差し替えた変種**、**P16 は P05 のテレメトリ最適化、P17 は P06 の機器軸変種**であり、
-> 5 案に独立して並べると設計の多様性が乏しい。これらは P05/P06 の**チューニングオプション**として 03 章で言及する。
-
-### なぜこの 5 案が「設計空間を代表」するか
-
-```
-              制約厳格 ↑
-                  P04(NetBox忠実)
-                  P03(固定レベル) [次点]
-  単一/大規模 ←── P06(閉包) ── P05(標準★) ──→ 多数DC/パッケージ
-                       P08(Temporal)
-                                P02(JSONB MVP)
-              可変性最大 ↓
+```mermaid
+erDiagram
+    POINT_TYPE {
+        bigint id PK
+        text func "sensor|cmd|sp"
+        smallint quantity_id FK
+        smallint phenom_id FK
+        text duct
+        smallint unit_id FK
+    }
 ```
 
-- **横軸（単一運用 ↔ パッケージ展開）**と**縦軸（制約厳格 ↔ 可変性最大）**で散らばっており、
-  顧客規模・要件に応じて選べる。
-- **P05 が中心（既定）**、**P04 が制約寄り**、**P02 が可変性寄り**、**P06 が読み性能特化**、
-  **P08 が履歴正確性特化**という役割分担。
+- D=3 / F=3 / P=4 / C=2。**却下理由**: (1) DCIM には過剰（HVAC/BMS 由来の精密合成は不要）、(2) `func` は型でなく**点の役割＝インスタンス属性**のはず、(3) `kind`/`unit` は量に関数従属し組合せ行に置くと更新異常、(4) nullable な phenom/duct を含む UNIQUE は NULL を異物扱いせず**重複防止が破れる**。
 
-各案の詳細設計（DDL・制約・トレードオフ）は [03-finalists.md](./03-finalists.md)、
-ユースケース検証は [04-validation-queries.md](./04-validation-queries.md) を参照。
+### B2. フラット `metric` カタログ（★採用）
+
+量・単位・型・既定集約を1行に。medium/位置（吸気/排気・冷水往/還）は**コードに織り込む**（`rack_inlet_temp`）。役割・相は `data_point` 側へ。
+
+```mermaid
+erDiagram
+    METRIC ||--o{ DATA_POINT : "何を測るか"
+    METRIC {
+        smallint id PK
+        text code UK "active_power|rack_inlet_temp|ppue"
+        text category "power|temperature|... (横断グルーピング)"
+        text unit "kW|°C"
+        text datatype "Number|Bool|Str"
+        boolean is_derived
+    }
+    DATA_POINT {
+        bigint id PK
+        bigint equipment_id FK
+        smallint metric_id FK
+        text role "sensor|sp|cmd|derived"
+        text phase "L1|L2|L3|none"
+        boolean is_writable
+    }
+```
+
+```sql
+-- 1機器内で同義の点は1つ（全列 NOT NULL でキーが確実に効く）
+DATA_POINT: UNIQUE (equipment_id, metric_id, role, phase)
+```
+
+- D=5 / F=5 / P=5 / C=5 → **B2**。単位整合は metric が単位を1つ持つことで自動成立（読み値は単位を持たない）。横断は `category` 1列。
+  **役割を `data_point.role` にしたことで、同一機器・同一量で「実測センサ／設定値 sp／指令 cmd」が共存**でき、制御に開いている。
+  DCIM の点は数えられる量（〜100）なので組合せ爆発も起きない（Redfish/Prometheus と同じ作法）。
 
 ---
 
-## 5. 補足：不採用パターンからの学び
+## 判断 C — 電力/冷却の表現
 
-- **P01 素朴フラット / P12 EAV / P20 PG継承** はアンチパターンとして検討に含めた。結論:
-  - EAV は **JSONB が完全上位互換**（型保持・GIN・JSON Schema 検証）。新規採用しない。
-  - `INHERITS` は **子テーブルが PK/UNIQUE/FK を継承しない**ため、DCIM の整合要件（シリアル一意・位置 FK）を満たせない。却下。
-  - 単一テーブル NULL 多用は「UPS にポート数」等の無意味列が爆発し制約も書けない。却下。
-- **P13 汎用接続 1 本** は実装が最も簡潔（合計 25）だが、電力/ネットの型混在で**誤接続を DB で防げない**点が
-  パッケージのゴール（制約厳格）と衝突。配線は C3（種別別 + Cable 実体）を主推奨とする。
-- **P10 Wide テレメトリ** は多項目同時表示には強いが、**新メトリックで `ALTER TABLE`** が必要で多数 DC 展開で
-  運用破綻。Narrow（T1）+ 集約で Wide ビューを作る方が良い。
-- **P03 固定レベル** は制約最強（D=5）だが、**「建屋なし DC」「コロのケージ/ゾーン階層」を吸収できず**
-  パッケージ要件（F=1）に致命的に弱い。ハイブリッド S5 がこの弱点を解消する。
+受電→変圧器→UPS→変圧器→分電盤→PDU→rack の**電力チェーン全体**（と冷却チェーン）をどう持つか。専用テーブル群か、汎用接続か。
+
+| 案 | 方式 | D | F | P | C | 判定 |
+|---|---|---|---|---|---|---|
+| C1 | 専用テーブル群（power_panel/breaker/power_feed） | 4 | 3 | 5 | 3 | ✕ 末端の分岐回路しか表せず上流チェーン（受電/変圧器/UPS）を欠く |
+| C2 | 型なし多態の汎用エッジ | 3 | 5 | 4 | 4 | ✕ 参照整合が DB 外 |
+| **C3** | **`equipment` ノード + 汎用 `connection`(medium) + 電気サブタイプ `power_connection`(CTI)** | 5 | 5 | 5 | 4 | **★採用** |
+
+```mermaid
+erDiagram
+    EQUIPMENT ||--o{ CONNECTION : "from/to"
+    MEDIUM ||--o{ CONNECTION : medium
+    CONNECTION ||--o| POWER_CONNECTION : "subtype (PK共有・medium=elec)"
+    CONNECTION {
+        bigint id PK
+        bigint from_equipment_id FK
+        bigint to_equipment_id FK
+        smallint medium_id FK
+        text redundancy
+    }
+    POWER_CONNECTION {
+        bigint connection_id PK "FK(共有PK)"
+        numeric voltage_v
+        text phase
+        numeric rated_a
+        bigint available_power_w "生成列"
+    }
+```
+
+> 受電設備・変圧器・UPS・盤・breaker・PDU は**すべて `equipment` ノード**、その間を `connection`（汎用エッジ・`medium`）で結ぶ。電気固有
+> （電圧/相/定格A/供給可能W）は **`power_connection` サブタイプ（PK 共有 CTI）**に型付きで（nullable スパース回避）。`power_feed` は廃止（吸収）。
+> 多段トレース・A系B系・dual-cord・SPOF は `connection` を辿る **`v_equip_flow`（導出ビュー）**で（基底エッジ1つ＋ビュー1つ＝真実源は1つ）。
+> 冷却も同じ `connection`（medium=chilled_water/air）で、将来 `cooling_connection` サブタイプを同型追加。
+
+---
+
+## 判断 D — 機器種別の階層（tree か DAG か）
+
+機器分類（UPS/PDU/CRAH…）に階層を持たせ「全 HVAC」を引きたい。多重継承（DAG）は要るか。
+
+| 案 | 方式 | D | F | P | C | 判定 |
+|---|---|---|---|---|---|---|
+| **D1** | **`equip_kind.parent_id` 親参照ツリー**（読み多なら閉包） | 4 | 5 | 5 | 5 | **★採用** |
+| D2 | DAG 閉包（多重親・path_count） | 5 | 5 | 5 | 2 | △ 実需が出たら拡張 |
+
+> DCIM の機器分類は実用上ほぼツリー。多重継承は稀で、必要になったら D2（閉包＋path_count）へ拡張。Haystack の DAG は内部に持ち込まない。
+
+---
+
+## 判断 E — スコープ参照（多態キー vs 排他アーク）
+
+`threshold`（metric/equipment/location）/ `capacity_budget`（location/rack）は「どの対象を指すか」が複数あり得る。どう参照整合を保つか。
+
+| 案 | 方式 | D | P | 判定 |
+|---|---|---|---|---|
+| E1 | 多態キー `(scope_type, scope_id)` | 2 | 5 | ✕ 実 FK が張れない（Karwin アンチパターン） |
+| **E2** | **排他アーク**（対象ごと nullable FK ＋「ちょうど1つ」CHECK） | 5 | 5 | **★採用** |
+
+```sql
+THRESHOLD: metric_id FK NULL, equipment_id FK NULL, location_id FK NULL,
+           CHECK ( num_nonnull(metric_id, equipment_id, location_id) = 1 )   -- 実FKで整合
+```
+
+> 「DB が弾く」思想で参照整合を DB の外にこぼさない。08章 `space_lease`（suite/cage→location, cabinet→rack）で既出の手法を横展開。
+
+---
+
+## 判断 F — 冗長構成（A/B 系・N+1/2N の組）
+
+UPS の A系/B系、N+1 の CRAH バンク等の「冗長な機器の組」をどう管理するか。
+
+| 案 | 方式 | 判定 |
+|---|---|---|
+| F1 | 機器に冗長属性を直付け / 物理から都度導出のみ | △ 「意図（N+1/2N）」が持てない |
+| **F2** | **`redundancy_group` + `redundancy_member`(leg/role)** | **★採用** |
+
+```mermaid
+erDiagram
+    REDUNDANCY_GROUP ||--o{ REDUNDANCY_MEMBER : members
+    EQUIPMENT ||--o{ REDUNDANCY_MEMBER : belongs
+    REDUNDANCY_GROUP {
+        bigint id PK
+        text domain "power|cooling|network"
+        text topology "N|N+1|N+2|2N|2N+1"
+        int n_required
+    }
+    REDUNDANCY_MEMBER {
+        bigint group_id PK
+        bigint equipment_id PK
+        text leg "A|B|C|none"
+        text role "active|standby|none"
+    }
+```
+
+> 冗長の**意図**を第一級に持ち（room_group と同じ群+所属パターン）、物理（A/B が独立電源か＝SPOF、N+1 が容量充足か）と
+> **突き合わせて検証**する（intent×reality）。A/B 系の所属自体は物理 path から導出（多用時のみ `equipment.power_side` を非正規化）。
+
+---
+
+## まとめ — 採用構成
+
+| 判断 | 採用 | 一言 |
+|------|------|------|
+| B 点の定義 | **フラット `metric` カタログ** | 量・単位・型を1行、役割/相は data_point へ |
+| C 電力/冷却 | 物理＝真実源 + 導出フロー | 並行グラフを持たない（v_equip_flow） |
+| D 階層 | 親参照ツリー | DAG はオプション |
+| E スコープ参照 | 排他アーク FK | 多態キー廃止で参照整合を DB に残す |
+| F 冗長 | `redundancy_group` + member | 意図を持ち物理で検証 |
+
+確定 DDL/ER は [03章](./03-finalists.md)、全体 ER は [05章](./05-er-diagram.md)、検証クエリは [04章](./04-validation-queries.md)。
