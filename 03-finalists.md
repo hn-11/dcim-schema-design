@@ -47,48 +47,54 @@ L8 監視             threshold（severity / hysteresis・排他アーク）
 
 ```mermaid
 erDiagram
-    TENANT ||--o{ LOCATION : owns
-    LOCATION ||--o{ LOCATION : parent
-    LOCATION ||--o{ LOCATION_CLOSURE : closure
-    LOCATION ||--o{ RACK : contains
-    LOCATION ||--o{ EQUIPMENT : installed
-    RACK ||--o{ EQUIPMENT_PLACEMENT : holds
-    EQUIPMENT ||--o| EQUIPMENT_PLACEMENT : mounted
-    EQUIPMENT_PLACEMENT ||--o{ RACK_UNIT_OCCUPANCY : occupies
+    TENANT ||--o{ LOCATION : "owns"
+    LOCATION ||--o{ LOCATION : "parent"
+    LOCATION ||--o{ LOCATION_CLOSURE : "closure"
+    LOCATION ||--o{ RACK : "contains"
+    LOCATION ||--o{ EQUIPMENT : "installed"
+    RACK ||--o{ EQUIPMENT_PLACEMENT : "holds"
+    EQUIPMENT ||--o| EQUIPMENT_PLACEMENT : "mounted"
+    EQUIPMENT_PLACEMENT ||--o{ RACK_UNIT_OCCUPANCY : "occupies"
 
-    EQUIP_KIND ||--o{ EQUIP_KIND : parent
-    EQUIP_KIND ||--o{ EQUIPMENT_TYPE : classifies
-    MANUFACTURER ||--o{ EQUIPMENT_TYPE : makes
-    EQUIPMENT_TYPE ||--o{ EQUIPMENT : instantiates
-    EQUIPMENT_TYPE ||--o{ POINT_TEMPLATE : templates
-    METRIC ||--o{ POINT_TEMPLATE : metric
+    EQUIP_KIND ||--o{ EQUIP_KIND : "parent"
+    EQUIP_KIND ||--o{ EQUIPMENT_TYPE : "classifies"
+    MANUFACTURER ||--o{ EQUIPMENT_TYPE : "makes"
+    EQUIPMENT_TYPE ||--o{ EQUIPMENT : "instantiates"
+    EQUIPMENT_TYPE ||--o{ POINT_TEMPLATE : "templates"
+    METRIC ||--o{ POINT_TEMPLATE : "metric"
 
-    EQUIPMENT ||--o{ DATA_POINT : points
-    METRIC ||--o{ DATA_POINT : measured
-    DATA_POINT ||--o| SERIES : raw
-    METRIC ||--o{ SERIES : denorm
+    EQUIPMENT ||--o{ DATA_POINT : "points"
+    METRIC ||--o{ DATA_POINT : "measured"
+    DATA_POINT ||--o| SERIES : "raw"
+    METRIC ||--o{ SERIES : "denorm"
     SERIES ||--o{ MEASUREMENT : "raw logical(no FK)"
     SERIES ||--o{ DERIVED_MEASUREMENT : "derived logical(no FK)"
     SERIES ||--o| CURRENT_VALUE : "current logical(no FK)"
 
-    MEDIUM ||--o{ CONNECTION : medium
-    EQUIPMENT ||--o{ CONNECTION : from
-    EQUIPMENT ||--o{ CONNECTION : to
-    CONNECTION ||--o| POWER_CONNECTION : electric
-    REDUNDANCY_GROUP ||--o{ REDUNDANCY_MEMBER : members
-    EQUIPMENT ||--o{ REDUNDANCY_MEMBER : belongs
+    MEDIUM ||--o{ CONNECTION : "medium"
+    EQUIPMENT ||--o{ CONNECTION : "from"
+    EQUIPMENT ||--o{ CONNECTION : "to"
+    CONNECTION ||--o| POWER_CONNECTION : "electric"
+    REDUNDANCY_GROUP ||--o{ REDUNDANCY_MEMBER : "members"
+    EQUIPMENT ||--o{ REDUNDANCY_MEMBER : "belongs"
 
-    LOCATION ||--o{ CAPACITY_BUDGET : arc
-    RACK ||--o{ CAPACITY_BUDGET : arc
-    EQUIPMENT ||--o{ EQUIPMENT_DEMAND : demand
-    METRIC ||--o{ THRESHOLD : arc
-    EQUIPMENT ||--o{ THRESHOLD : arc
-    LOCATION ||--o{ THRESHOLD : arc
+    LOCATION ||--o{ CAPACITY_BUDGET : "arc"
+    RACK ||--o{ CAPACITY_BUDGET : "arc"
+    EQUIPMENT ||--o{ EQUIPMENT_DEMAND : "demand"
+    METRIC ||--o{ THRESHOLD : "arc"
+    EQUIPMENT ||--o{ THRESHOLD : "arc"
+    LOCATION ||--o{ THRESHOLD : "arc"
 ```
 
-> `equipment.location_id` は**現在の設置空間**（denorm・現配置由来）。
-> 配置の履歴（いつどのラック/U に在ったか）は **`equipment_placement`（Type-2 SCD）**が真実源で、現在 = `valid_to IS NULL`。
-> `location_id` は空間集約の高速化用、`equipment_placement` は物理搭載詳細＋履歴用。
+> **「現在＝denorm 列」と「履歴＝Type-2 表」を対で持つのが本設計の一貫パターン**:
+>
+> | 関係 | 現在(denorm) | 履歴(Type-2 SCD) |
+> |---|---|---|
+> | 機器 ↔ 配置 | `equipment.location_id` | `equipment_placement`（現在 = `valid_to IS NULL`） |
+> | テナント ↔ 空間占有 | `location.tenant_id` | `space_lease`（08章） |
+> | テナント ↔ 資産所有 | `equipment.tenant_id` | `equipment_ownership`（08章） |
+>
+> 現在列は集約・フィルタの高速化用、Type-2 表が履歴の真実源。`location_id`/`tenant_id` を別途 Type-2 化はしない（履歴は対応する SCD 表が持つ）。
 
 ---
 
@@ -121,7 +127,7 @@ erDiagram
         text loc_type "region|campus|building|floor|room|dataCenter|cage|zone|row"
         text name
         text code "現場の区画/機器番号"
-        bigint tenant_id FK "cage 等の所有(08章)"
+        bigint tenant_id FK "現在の所有/割当(denorm)。占有の履歴・期間は space_lease(08章 Type-2)"
     }
     LOCATION_CLOSURE {
         bigint ancestor_id PK,FK
@@ -224,12 +230,12 @@ erDiagram
         text asset_tag UK
         text serial UK
         text status "planned|staged|active|offline|decommissioned"
-        bigint location_id FK
+        bigint location_id FK "現在の設置空間(denorm)。配置履歴は equipment_placement(Type-2)"
         bigint parent_equipment_id FK "self"
         int panel_position "breaker等の盤内位置(任意)"
         int poles "breaker等"
         numeric rated_a "breaker等"
-        bigint tenant_id FK
+        bigint tenant_id FK "現在の所有者(denorm)。資産所有の履歴は equipment_ownership(08章 Type-2)"
     }
 ```
 

@@ -176,7 +176,7 @@ CREATE TABLE lease_unit_occupancy (
 
 ## 8.5 所有 vs 設置の整合
 
-- `equipment.tenant_id`（コア・[03章 L2](./03-finalists.md)） = 資産所有者（コロ顧客）。**床・ラックは DC 所有、中身はテナント所有**を表せる。
+- `equipment.tenant_id`（コア・[03章 L2](./03-finalists.md)） = **現在の**資産所有者（denorm）。**床・ラックは DC 所有、中身はテナント所有**を表せる。所有移転の**履歴**は下記 `equipment_ownership`（Type-2）が持つ。
 - `location.tenant_id`（コア・[03章 L1](./03-finalists.md)） = cage 等の区画所有者。lease を導入しない軽量構成では、この2列の直接突合だけで区画整合を取れる。
 - **整合チェック（監視ビュー/サービス層）**：機器の現在配置（`equipment_placement` の `valid_to IS NULL` → rack/location）を**覆う有効 lease のテナント**（または cage の `location.tenant_id`）と
   `equipment.tenant_id` が一致するか。不一致＝「他人の区画に置かれた機器」を検出。
@@ -199,6 +199,33 @@ LEFT JOIN space_lease l
                       AND lc.descendant_id = rk.location_id)) )
 WHERE e.tenant_id IS NOT NULL AND l.id IS NULL;   -- 覆う自テナントのリースが無い
 ```
+
+### 資産所有の履歴（equipment_ownership・Type-2）
+
+`equipment.tenant_id`（現在の所有者）に対し、所有移転の履歴を Type-2 で持つ ── `equipment_placement` / `space_lease` と同じ「現在 denorm ＋ Type-2 履歴」の対。
+
+```mermaid
+erDiagram
+    TENANT ||--o{ EQUIPMENT_OWNERSHIP : "owns over time"
+    EQUIPMENT ||--o{ EQUIPMENT_OWNERSHIP : "ownership history"
+    EQUIPMENT_OWNERSHIP {
+        bigint id PK
+        bigint equipment_id FK
+        bigint tenant_id FK
+        timestamptz valid_from
+        timestamptz valid_to "NULL=現在"
+    }
+```
+
+```sql
+-- 機器ごとに現在所有は高々1: 部分UNIQUE (equipment_id) WHERE valid_to IS NULL（PG / LCD代替は09章）
+-- 同一機器の所有期間は重ならない（サービス層で担保）。equipment.tenant_id は現在行の denorm（移転時に更新）
+CHECK ( valid_to IS NULL OR valid_to > valid_from )
+```
+
+> テナント↔空間は `space_lease`、テナント↔資産は `equipment_ownership` ──
+> どちらも「現在＝コアの `tenant_id` 列、履歴＝モジュールの Type-2 表」。
+> 課金は通常**空間（space_lease）ドリブン**なので、`equipment_ownership` は資産所有の移転トレース/監査が要件のときに足す任意レイヤ。
 
 ---
 
