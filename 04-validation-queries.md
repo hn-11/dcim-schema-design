@@ -342,17 +342,17 @@ SELECT b.dimension, b.rated, b.soft_limit, b.redundancy_reserve,
 FROM capacity_budget b
 LEFT JOIN LATERAL (   -- 予約合計（equipment_demand から。推定負荷戦略適用後の reserved）
     SELECT sum(ed.reserved) AS reserved_sum
-    FROM rack_mount rm
+    FROM equipment_placement rm
     JOIN equipment_demand ed ON ed.equipment_id = rm.equipment_id AND ed.dimension = b.dimension
-    WHERE rm.rack_id = b.rack_id
+    WHERE rm.rack_id = b.rack_id AND rm.valid_to IS NULL          -- 現在配置のみ(Type-2)
 ) r ON true
 LEFT JOIN LATERAL (   -- 実測（current_value の電力合計・健全値のみ）
     SELECT sum(cv.value) AS actual_now
-    FROM rack_mount rm
+    FROM equipment_placement rm
     JOIN series s        ON s.equipment_id = rm.equipment_id
     JOIN current_value cv ON cv.series_id = s.series_id AND cv.cur_status = 'ok'
     JOIN metric m        ON m.id = s.metric_id AND m.code = 'active_power'  -- ★ code 直指定
-    WHERE rm.rack_id = b.rack_id
+    WHERE rm.rack_id = b.rack_id AND rm.valid_to IS NULL          -- 現在配置のみ(Type-2)
       AND b.dimension  = 'power_w'
 ) a ON true
 WHERE b.rack_id     = :rack_id
@@ -372,7 +372,7 @@ WHERE b.rack_id     = :rack_id
     適用後の働く値。銘板をそのまま使うのではなく **adjusted_nameplate**（派生定格 ~50-75%）や **predicted** を使うと
     死蔵容量を圧縮できる（EcoStruxure 推定負荷戦略）。コロ顧客は `contracted`（契約電力）で予約する（[08章](./08-tenancy-colocation.md)）。
   - 実測の絞り込みも `m.code = 'active_power'` の1 JOIN（単位整合は `metric` 行が保証）。
-  - **`rack_mount` 経由で機器を取得**: ラック搭載機器の一覧は `rack_mount`（`equipment_id UNIQUE`）経由が
+  - **現在配置で機器を取得**: ラック搭載機器の一覧は `equipment_placement`（`WHERE valid_to IS NULL`＝現在配置・Type-2）経由が
     簡潔（`rack_unit_occupancy` は空き U 検索 UC-3 向け・U 数分の重複行がある）。
   - DCIM の中核 KPI「**stranded = reserved − actual**」。実測ベースで予算化すると死蔵容量を回収できる。
   - 「予約合計 ≤ rated」「rack 内合計 ≤ power_connection.available_power_w」等の**集約制約はサービス層**で担保

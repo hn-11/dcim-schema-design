@@ -178,7 +178,7 @@ CREATE TABLE lease_unit_occupancy (
 
 - `equipment.tenant_id`（コア・[03章 L2](./03-finalists.md)） = 資産所有者（コロ顧客）。**床・ラックは DC 所有、中身はテナント所有**を表せる。
 - `location.tenant_id`（コア・[03章 L1](./03-finalists.md)） = cage 等の区画所有者。lease を導入しない軽量構成では、この2列の直接突合だけで区画整合を取れる。
-- **整合チェック（監視ビュー/サービス層）**：機器の設置位置（rack_mount → rack/location）を**覆う有効 lease のテナント**（または cage の `location.tenant_id`）と
+- **整合チェック（監視ビュー/サービス層）**：機器の現在配置（`equipment_placement` の `valid_to IS NULL` → rack/location）を**覆う有効 lease のテナント**（または cage の `location.tenant_id`）と
   `equipment.tenant_id` が一致するか。不一致＝「他人の区画に置かれた機器」を検出。
 
 ```sql
@@ -187,7 +187,7 @@ CREATE TABLE lease_unit_occupancy (
 CREATE VIEW v_lease_placement_violation AS
 SELECT e.id AS equipment_id, e.tenant_id, rm.rack_id
 FROM equipment e
-JOIN rack_mount rm ON rm.equipment_id = e.id
+JOIN equipment_placement rm ON rm.equipment_id = e.id AND rm.valid_to IS NULL   -- 現在配置(Type-2)
 JOIN rack rk ON rk.id = rm.rack_id
 LEFT JOIN space_lease l
   ON l.valid_from <= now() AND (l.valid_to IS NULL OR l.valid_to > now())   -- 有効期間

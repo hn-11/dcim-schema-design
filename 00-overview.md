@@ -22,8 +22,8 @@ EMS/BMS/IT を横断し、将来の制御（設定値・指令）も視野に入
 ```mermaid
 erDiagram
     LOCATION ||--o{ RACK : contains
-    RACK ||--o{ RACK_MOUNT : holds
-    EQUIPMENT ||--o| RACK_MOUNT : mounted
+    RACK ||--o{ EQUIPMENT_PLACEMENT : holds
+    EQUIPMENT ||--o| EQUIPMENT_PLACEMENT : mounted
     EQUIPMENT_TYPE ||--o{ EQUIPMENT : instantiates
     EQUIPMENT ||--o{ DATA_POINT : "点(計測/制御)"
     METRIC ||--o{ DATA_POINT : "何を測るか"
@@ -89,8 +89,8 @@ erDiagram
     TENANT ||--o{ LOCATION : owns
     LOCATION ||--o{ LOCATION : "parent (木)"
     LOCATION ||--o{ RACK : contains
-    RACK ||--o{ RACK_MOUNT : holds
-    EQUIPMENT ||--o| RACK_MOUNT : "mounted (1機器=1搭載)"
+    RACK ||--o{ EQUIPMENT_PLACEMENT : holds
+    EQUIPMENT ||--o| EQUIPMENT_PLACEMENT : "mounted (1機器=1搭載)"
     EQUIP_KIND ||--o{ EQUIPMENT_TYPE : classifies
     MANUFACTURER ||--o{ EQUIPMENT_TYPE : makes
     EQUIPMENT_TYPE ||--o{ EQUIPMENT : instantiates
@@ -106,7 +106,7 @@ erDiagram
         bigint id PK
         int u_height
     }
-    RACK_MOUNT {
+    EQUIPMENT_PLACEMENT {
         bigint id PK
         int position
         text face "front|rear"
@@ -133,8 +133,8 @@ erDiagram
 **解説**：`LOCATION` は Region→…→Row までを1本の**隣接リスト木**で表す（配下集約は閉包テーブルで高速化・[03章 L1](./03-finalists.md)）。
 `RACK` だけは固定アンカーで専用表にし、U の物理重なりは占有U行＋複合 UNIQUE で DB が禁止する。
 `EQUIPMENT.location_id` は設置先の空間を直に指す。
-ラック搭載機器はこれに加えて `RACK_MOUNT` を持ち、ラック ID・U 位置・面を表す。
-つまり `location_id` は空間集約用、`rack_mount` はラック内の物理搭載詳細用。
+ラック搭載機器はこれに加えて `EQUIPMENT_PLACEMENT` を持ち、ラック ID・U 位置・面を表す。
+つまり `location_id` は空間集約用、`equipment_placement` はラック内の物理搭載詳細用。
 **型番 `EQUIPMENT_TYPE`（EcoStruxure の Genome 相当）と実機 `EQUIPMENT` を分離**し、新機種はデータ追加だけで増やせる（DDL 不要）。
 `EQUIP_KIND` は機器の種類（UPS/PDU/CRAH…）を分類し、`power_class` で pPUE の IT/施設を判別する。
 

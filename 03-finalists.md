@@ -52,9 +52,9 @@ erDiagram
     LOCATION ||--o{ LOCATION_CLOSURE : closure
     LOCATION ||--o{ RACK : contains
     LOCATION ||--o{ EQUIPMENT : installed
-    RACK ||--o{ RACK_MOUNT : holds
-    EQUIPMENT ||--o| RACK_MOUNT : mounted
-    RACK_MOUNT ||--o{ RACK_UNIT_OCCUPANCY : occupies
+    RACK ||--o{ EQUIPMENT_PLACEMENT : holds
+    EQUIPMENT ||--o| EQUIPMENT_PLACEMENT : mounted
+    EQUIPMENT_PLACEMENT ||--o{ RACK_UNIT_OCCUPANCY : occupies
 
     EQUIP_KIND ||--o{ EQUIP_KIND : parent
     EQUIP_KIND ||--o{ EQUIPMENT_TYPE : classifies
@@ -86,17 +86,17 @@ erDiagram
     LOCATION ||--o{ THRESHOLD : arc
 ```
 
-> `equipment.location_id` が設置先の空間を直接指す。
-> ラック搭載機器は追加で `rack_mount` にリンクし、ラック ID・U 位置・面を持つ。
-> つまり `location_id` は空間集約用、`rack_mount` はラック内の物理搭載詳細用。
+> `equipment.location_id` は**現在の設置空間**（denorm・現配置由来）。
+> 配置の履歴（いつどのラック/U に在ったか）は **`equipment_placement`（Type-2 SCD）**が真実源で、現在 = `valid_to IS NULL`。
+> `location_id` は空間集約の高速化用、`equipment_placement` は物理搭載詳細＋履歴用。
 
 ---
 
 ## L1. 空間層
 
 `location` 隣接リスト＝真実源 ＋ `location_closure`（`ltree` 不使用 LCD）。
-`equipment` は設置先 `location` を直接参照する。
-`rack` は固定アンカーで、U 物理重なり禁止は**占有U行＋複合UNIQUE**（拡張ゼロ LCD）で担保する。
+機器の配置は **`equipment_placement`（Type-2 SCD・`valid_from`/`valid_to`）**で履歴保持し、現在配置 = `valid_to IS NULL`。
+`rack` は固定アンカーで、U 物理重なり禁止は**現在配置の占有U行＋複合UNIQUE**（拡張ゼロ LCD）で担保する。
 
 ```mermaid
 erDiagram
@@ -105,9 +105,10 @@ erDiagram
     LOCATION ||--o{ LOCATION_CLOSURE : "ancestor/descendant"
     LOCATION ||--o{ RACK : contains
     LOCATION ||--o{ EQUIPMENT : "installed (spaceRef)"
-    RACK ||--o{ RACK_MOUNT : holds
-    EQUIPMENT ||--o| RACK_MOUNT : "mounted (UNIQUE equipment)"
-    RACK_MOUNT ||--o{ RACK_UNIT_OCCUPANCY : "occupies U×face"
+    RACK ||--o{ EQUIPMENT_PLACEMENT : holds
+    LOCATION ||--o{ EQUIPMENT_PLACEMENT : "floor置き"
+    EQUIPMENT ||--o{ EQUIPMENT_PLACEMENT : "placed (Type-2 履歴)"
+    EQUIPMENT_PLACEMENT ||--o{ RACK_UNIT_OCCUPANCY : "現在の占有U×face"
 
     TENANT {
         bigint id PK
@@ -139,27 +140,33 @@ erDiagram
         bigint id PK
         bigint location_id FK
     }
-    RACK_MOUNT {
+    EQUIPMENT_PLACEMENT {
         bigint id PK
-        bigint rack_id FK
-        bigint equipment_id FK "UNIQUE"
+        bigint equipment_id FK
+        bigint rack_id FK "racked のとき"
+        bigint location_id FK "floor置き等"
         int position
         int u_height
         text face "front|rear"
+        timestamptz valid_from
+        timestamptz valid_to "NULL=現在"
     }
     RACK_UNIT_OCCUPANCY {
         bigint rack_id PK
         text rack_side PK
         text face PK
         int u PK
-        bigint mount_id FK
+        bigint placement_id FK "現在配置(valid_to IS NULL)のみ"
     }
 ```
 
 ```sql
 CHECK ( loc_type IN ('region','campus') OR parent_id IS NOT NULL )      -- ルート以外は親必須
--- U: position + u_height - 1 <= rack.u_height は CONSTRAINT TRIGGER（親値参照）
--- フルデプス機器は front/rear 両面に占有U行 → 片面機器と必ず衝突（複合PKで原子的拒否）
+-- 配置は Type-2 SCD: 現在配置 = valid_to IS NULL。機器ごとに現在配置は高々1
+--   → 部分UNIQUE (equipment_id) WHERE valid_to IS NULL（PG / LCD代替は09章）。同一機器の有効期間の重複はサービス層で禁止
+-- U: position + u_height - 1 <= rack.u_height は CONSTRAINT TRIGGER。U物理重なり禁止は「現在配置」の占有U行のみ
+--   フルデプス機器は front/rear 両面に占有U行 → 片面機器と必ず衝突（複合PKで原子的拒否）
+-- 移設時: 旧 placement に valid_to を打ち、新 placement＋占有U行を挿入（履歴は残る）
 ```
 
 ---
@@ -233,8 +240,8 @@ EQUIPMENT:      UNIQUE (parent_equipment_id, panel_position)  -- panel_position 
 
 > `point_template` は機種が持つ点の雛形で、実機作成時に `data_point`（L4）へ展開する。
 > `equipment.location_id` は設置先の空間を直接指す。
-> ラック搭載機器は、これに加えて `rack_mount` でラック ID・U 位置・面を持つ。
-> `location_id` は空間集約用、`rack_mount` はラック内の物理搭載詳細用と役割を分ける。
+> ラック搭載機器は、これに加えて `equipment_placement` でラック ID・U 位置・面を持つ。
+> `location_id` は空間集約用、`equipment_placement` はラック内の物理搭載詳細用と役割を分ける。
 > breaker は専用表にしない。
 > `equipment(equip_kind='breaker')` と `parent_equipment_id` / `panel_position` / `rated_a` で表す。
 > **「意味ある点の組合せ」は機種側に置く**。
@@ -375,6 +382,11 @@ erDiagram
 CHECK ( (series_kind='raw' AND data_point_id IS NOT NULL AND measurement_scope_id IS NULL)
      OR (series_kind='derived' AND data_point_id IS NULL) )
 CHECK ( scope_type <> 'measurement_scope' OR measurement_scope_id IS NOT NULL )
+-- ★ series は data_point より長生きする（時系列の追跡を切らさない）:
+--   data_point_id FK は ON DELETE SET NULL（CASCADE 不可。消すと measurement の series_id が孤児化）。
+--   series の意味は自己完結（metric_id/equipment_id/rack_id/location_id を取込時点で凍結保持）→ data_point の設定変更では揺れない。
+-- ★ retire-not-mutate: 取得対象を別物に転用する時は、生きた series を書き換えず
+--   旧 series に retired_at を打って新 series を作る（過去データは旧 series_id の凍結意味のまま残る）。
 ```
 
 ### TSDB テーブル分割方針（性能）
