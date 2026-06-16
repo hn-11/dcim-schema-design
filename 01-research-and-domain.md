@@ -62,7 +62,7 @@ EcoStruxure の**推定負荷戦略**（働く電力値の決め方）:
 | **contracted** | コロ契約電力を rack PDU/receptacle に配分（[08章](./08-tenancy-colocation.md)） |
 
 `PUE = 総施設エネルギー / IT 機器エネルギー`（Green Grid、理想 1.0）。**pPUE = 境界内の総 ÷ 同境界内の IT**。
-EcoStruxure は **site/room 単位**で PUE を算出（EN 50600-4-2）。境界＝ゾーンが集計単位（[10章](./10-room-group-derived-metrics.md) の部屋グループに直結）。
+EcoStruxure は **site/room 単位**で PUE を算出（EN 50600-4-2）。境界＝ゾーンが集計単位（[10章](./10-measurement-scope-derived-metrics.md) の `measurement_scope` に直結）。
 
 ### 1.5 収集プロトコル
 
@@ -141,7 +141,7 @@ Schneider の DCIM（旧 StruxureWare DCO → IT Advisor、監視は Data Center
 
 ## 3. セマンティックを RDBMS 制約に reify するパターン
 
-「タグの辞書（schemaless）」を**強い制約のある RDBMS**へ落とすときの定石（[02章](./02-candidate-patterns.md) で採否）。
+「タグの辞書（schemaless）」を**強い制約のある RDBMS**へ落とすときの定石。
 
 - **EAV（Entity-Attribute-Value）はアンチパターン**（Karwin『SQL Antipatterns』）: 汎用 value 列は**型・NOT NULL・UNIQUE・FK が
   効かず**、再構成に多重 JOIN。→ 生 EAV は採らない。
@@ -149,8 +149,11 @@ Schneider の DCIM（旧 StruxureWare DCO → IT Advisor、監視は Data Center
 - **階層**: 隣接リスト単独は "Naive Trees" アンチパターン。**閉包テーブル**は部分木クエリ高速・**FK 整合・複数親可**で、
   **DAG の推移閉包**の標準表現（Karwin）。`ltree`/Nested Set は移植性・整合で劣る。
 - **DAG の閉包**は tree より重い: **path_count**（複数経路で到達）、挿入は O(祖先×子孫)、辺削除は減算→0 で行削除、サイクル禁止チェック。
-  → **本設計の判断**（[02章 D](./02-candidate-patterns.md)）: Haystack の `is` は DAG だが、DCIM の機器分類は実用上ほぼツリー。
-  内部は `equip_kind` の**親参照ツリー**（読み多なら閉包）に留め、DAG はメタモデル直輸入せず interop 境界でマッピング。多重継承の実需が出たら拡張。
+  → **本設計の判断**:
+  Haystack の `is` は DAG だが、DCIM の機器分類は実用上ほぼツリー。
+  内部は `equip_kind` の**親参照ツリー**（読み多なら閉包）に留める。
+  DAG はメタモデルとして直輸入せず、interop 境界でマッピングする。
+  多重継承の実需が出たら拡張する。
 - **制約付き語彙タグ（`tag_def`+`entity_tag` を FK）vs 生 JSONB**: 前者は**語彙・一意・整合を DB が強制**、後者は方言差・FK 不可。
 - **コンセンサス = ハイブリッド**: 安定・検索・整合が要る中核は**型付き列＋FK/CHECK**、疎で進化する末尾のみ JSONB/タグ。
   PG JSONB は FK 不可・CHECK は「キー不在で NULL→通過」の罠あり。**これが本設計の中核方針**。
@@ -159,7 +162,13 @@ Schneider の DCIM（旧 StruxureWare DCO → IT Advisor、監視は Data Center
 
 ## 4. RDBMS 制約に落とすべき業務ルール
 
-**★=DB 制約で表現可 / ▲=サービス層・監視ビュー（行間集約のため単一行 CHECK 不可、移植性のため DB トリガに依存させない・[09章](./09-portability.md)）**
+**凡例**
+
+- ★ = DB 制約で表現可
+- ▲ = サービス層・監視ビューで担保
+
+▲ の項目は行間集約を含むため、単一行 CHECK では表せない。
+移植性のため DB トリガにも依存させない（[09章](./09-portability.md)）。
 
 **空間・搭載**
 - ★ U の物理重なり禁止（**占有U行＋複合UNIQUE**。`EXCLUDE`/range を使わない LCD 化。フルデプスは front/rear 両面）
@@ -167,14 +176,14 @@ Schneider の DCIM（旧 StruxureWare DCO → IT Advisor、監視は Data Center
 - ▲ 機器気流方向が row のアイル整列と整合
 
 **電力**
-- ★ ブレーカ位置一意・回路定格（`breaker UNIQUE(panel,position)` + `rated_a`）/ ★ available_power = V×A×util×√3（生成列・bigint）
+- ★ ブレーカ位置一意・回路定格（`equipment(equip_kind='breaker')` + `UNIQUE(parent_equipment_id,panel_position)` + `rated_a`）/ ★ available_power = V×A×util×√3（生成列・bigint）
 - ★ A/B 二重給電の冗長ペア（`paired_power`）/ ▲ A 給電と B 給電が異なる上流（同一なら SPOF）
 - ▲ 回路の接続機器 draw 合計 ≤ ブレーカ定格（連続負荷 ×0.8）
 
 **意味論（Haystack）**
 - ★ 量と単位の整合（`metric` 行が単位を1つ保持＝読み値は単位を持たない。power に °C 不可）
-- ★ 点の機能は正確に1つ（`point_function` FK）/ ★ 1機器に同一意味の点は1つ（`data_point` UNIQUE）
-- ★ 「全 hvac / 全 power」を再帰なし集約（`def_closure` DAG）
+- ★ 点の機能は正確に1つ（`data_point.role`）/ ★ 1機器に同一意味の点は1つ（`data_point` UNIQUE）
+- ★ 「全 hvac / 全 power」を集約（`equip_kind` 親参照ツリー。読み多なら任意の閉包）
 
 **冷却・容量・コロ**
 - ▲ センサ温湿度が機器 ASHRAE クラス内 / ▲ ラック発熱 ≤ 冷却容量（rack/row/room）
