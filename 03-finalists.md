@@ -352,13 +352,12 @@ erDiagram
     SERIES {
         bigint series_id PK
         text series_kind "raw|derived"
-        text scope_type "equipment|rack|location|measurement_scope"
-        bigint data_point_id FK "raw のみ"
+        bigint data_point_id FK "raw: 取得設定"
         smallint metric_id FK "denorm"
-        bigint equipment_id "denorm(raw)"
-        bigint rack_id "denorm(空間集約)"
-        bigint location_id "denorm(閉包JOIN)"
-        bigint measurement_scope_id FK "derived scope・10章"
+        bigint equipment_id "raw: 凍結denorm(空間ロールアップ)"
+        bigint rack_id "raw: 凍結denorm"
+        bigint location_id "raw: 凍結denorm(閉包JOIN)"
+        bigint measurement_scope_id FK "derived: 集約対象(唯一の結び先・10章)"
         timestamptz retired_at
     }
     MEASUREMENT {
@@ -385,9 +384,11 @@ erDiagram
 ```
 
 ```sql
-CHECK ( (series_kind='raw' AND data_point_id IS NOT NULL AND measurement_scope_id IS NULL)
-     OR (series_kind='derived' AND data_point_id IS NULL) )
-CHECK ( scope_type <> 'measurement_scope' OR measurement_scope_id IS NOT NULL )
+-- ★ scope_type(多態判別)は廃止。raw か derived かで結び先が一意に決まる:
+--   raw     → data_point + 凍結 denorm(equipment/rack/location)。集約対象ではなく「生値の出所」
+--   derived → measurement_scope_id 一本(集約対象)。location/rack 単独集約も measurement_scope(メンバー1個)で表す
+CHECK ( (series_kind='raw'     AND data_point_id IS NOT NULL AND measurement_scope_id IS NULL)
+     OR (series_kind='derived' AND data_point_id IS NULL     AND measurement_scope_id IS NOT NULL) )
 -- ★ series は data_point より長生きする（時系列の追跡を切らさない）:
 --   data_point_id FK は ON DELETE SET NULL（CASCADE 不可。消すと measurement の series_id が孤児化）。
 --   series の意味は自己完結（metric_id/equipment_id/rack_id/location_id を取込時点で凍結保持）→ data_point の設定変更では揺れない。

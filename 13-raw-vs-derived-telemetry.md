@@ -17,7 +17,7 @@ DCIM が扱う時系列値には**2種類**ある:
 | 生成主体 | **コレクタ**が SNMP/Modbus/Redfish 等でポーリング | **サービス層の定期ジョブ** / 連続集計（CAGG） |
 | `data_point` | **あり**（equipment×metric×role×phase ＋ 取得アドレス） | **なし**（`data_point_id = NULL`） |
 | `series.series_kind` | `raw` | `derived` |
-| `series.scope_type` | `equipment` | `measurement_scope`（または rack/location） |
+| `series` の結び先 | `equipment`＋凍結 denorm（生値の出所） | `measurement_scope_id` 一本（集約対象） |
 | 意味の源 | `metric_id` ＋ `equipment_id`（取込時点で凍結） | `metric_id` ＋ `measurement_scope_id` |
 | 格納 hypertable | `measurement`（高頻度・短 retention・圧縮） | `derived_measurement`（低頻度・長 retention） |
 | 最新値 | `current_value`（**共通**） | `current_value`（**共通**） |
@@ -103,11 +103,10 @@ WHERE s.measurement_scope_id = :scope_id;
 ## 6. 整合制約（どちらの系列かを DB が保証）
 
 ```sql
--- series: raw は data_point 必須で scope=equipment、derived は data_point なし
+-- scope_type(多態判別)は無し。raw か derived かで結び先が一意:
+--   raw → data_point + 凍結denorm / derived → measurement_scope_id 一本
 CHECK ( (series_kind='raw'     AND data_point_id IS NOT NULL AND measurement_scope_id IS NULL)
-     OR (series_kind='derived' AND data_point_id IS NULL) )
--- scope=measurement_scope なら scope id 必須
-CHECK ( scope_type <> 'measurement_scope' OR measurement_scope_id IS NOT NULL )
+     OR (series_kind='derived' AND data_point_id IS NULL     AND measurement_scope_id IS NOT NULL) )
 -- 派生系列の重複防止（境界×metric で1本）
 UNIQUE (measurement_scope_id, metric_id) WHERE series_kind='derived'   -- PG / LCD代替は09章
 ```

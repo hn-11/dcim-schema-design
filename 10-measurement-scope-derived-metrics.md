@@ -138,13 +138,12 @@ erDiagram
     SERIES {
         bigint series_id PK
         text series_kind "raw | derived"
-        text scope_type "equipment|rack|location|measurement_scope"
-        bigint data_point_id FK "raw のみ・derived は NULL"
+        bigint data_point_id FK "raw: 取得設定"
         smallint metric_id FK "非正規化"
-        bigint equipment_id "非正規化(raw)"
-        bigint rack_id "非正規化(空間集約)"
-        bigint location_id "非正規化(閉包JOIN)"
-        bigint measurement_scope_id FK "derived(scope)"
+        bigint equipment_id "raw: 凍結denorm"
+        bigint rack_id "raw: 凍結denorm"
+        bigint location_id "raw: 凍結denorm(閉包JOIN)"
+        bigint measurement_scope_id FK "derived: 集約対象(唯一の結び先)"
         timestamptz retired_at
     }
     DERIVED_MEASUREMENT {
@@ -163,9 +162,9 @@ erDiagram
 ```
 
 ```sql
-CHECK ( (series_kind='raw' AND data_point_id IS NOT NULL AND measurement_scope_id IS NULL)
-     OR (series_kind='derived' AND data_point_id IS NULL) )
-CHECK ( scope_type <> 'measurement_scope' OR measurement_scope_id IS NOT NULL )
+-- scope_type(多態判別)は廃止: derived は measurement_scope_id 一本に結ぶ（部屋/ラック単独集約もメンバー1個の scope で表す）
+CHECK ( (series_kind='raw'     AND data_point_id IS NOT NULL AND measurement_scope_id IS NULL)
+     OR (series_kind='derived' AND data_point_id IS NULL     AND measurement_scope_id IS NOT NULL) )
 
 -- pPUE 等、同一スコープ内の同一派生 metric は1系列
 -- PG: partial unique / LCD: 生成列 NULL-unique または derived_series 別表
