@@ -14,6 +14,7 @@ pPUE は `data_point` ではなく、`measurement_scope` に紐づく **derived 
 > - 時系列（`measurement` / `derived_measurement` / `current_value`）は **TimescaleDB** 側。
 >   hypertable には **実 FK を張らない**（`series_id` の論理参照のみ）。
 > - 計測スコープは `location` 木のノードにしない。物理階層を壊さず、横断的な境界として持つ。
+> - スコープメンバーは種別テーブル分割（`ms_location` / `ms_rack` / `ms_equipment` / `ms_connection`）で参照する。種別ごとに専用テーブルを持ち、FK 整合性を DB が担保する。`target_type + target_id` 型の多態キーは使わない。
 > - スコープ候補の導出、pPUE 算出、メンバー更新は**サービス層**。PG 固有機能・トリガ依存なし。
 
 ---
@@ -47,52 +48,81 @@ flowchart LR
 ## 10.2 計測スコープ（Measurement Scope）
 
 計測・派生 KPI の所属先を表す第一級エンティティ。
-境界の構成要素は、location だけでなく rack / equipment / connection を指せる排他アークにする。
+境界の構成要素は、location だけでなく rack / equipment / connection を指せる。
+参照は種別テーブル分割（`ms_location` / `ms_rack` / `ms_equipment` / `ms_connection`）で型安全に持つ。
 
 ```mermaid
 erDiagram
     TENANT ||--o{ MEASUREMENT_SCOPE : owns
-    MEASUREMENT_SCOPE ||--o{ MEASUREMENT_SCOPE_MEMBER : members
-    LOCATION ||--o{ MEASUREMENT_SCOPE_MEMBER : "arc"
-    RACK ||--o{ MEASUREMENT_SCOPE_MEMBER : "arc"
-    EQUIPMENT ||--o{ MEASUREMENT_SCOPE_MEMBER : "arc"
-    CONNECTION ||--o{ MEASUREMENT_SCOPE_MEMBER : "arc"
+    MEASUREMENT_SCOPE }o--o| EQUIPMENT_GROUP : "optional cross-ref(14章)"
+    MEASUREMENT_SCOPE ||--o{ MS_LOCATION : members
+    MEASUREMENT_SCOPE ||--o{ MS_RACK : members
+    MEASUREMENT_SCOPE ||--o{ MS_EQUIPMENT : members
+    MEASUREMENT_SCOPE ||--o{ MS_CONNECTION : members
+    LOCATION ||--o{ MS_LOCATION : belongs
+    RACK ||--o{ MS_RACK : belongs
+    EQUIPMENT ||--o{ MS_EQUIPMENT : belongs
+    CONNECTION ||--o{ MS_CONNECTION : belongs
 
     MEASUREMENT_SCOPE {
         bigint id PK
-        text code UK
+        text scope_key UK
         text name
-        text scope_kind "energy_boundary|cooling_boundary|tenant_boundary|custom"
-        text derivation "topology|manual|import"
-        text status "candidate|active|retired"
+        text scope_kind FK "energy_boundary|cooling_boundary|tenant_boundary|custom"
+        text derivation_method FK "topology|manual|import"
+        text scope_status FK "candidate|active|retired"
         timestamptz valid_from
         timestamptz valid_to
         bigint tenant_id FK
+        bigint equipment_group_id FK "optional cross-ref(14章)"
     }
-    MEASUREMENT_SCOPE_MEMBER {
-        bigint id PK
+    MS_LOCATION {
         bigint scope_id FK
-        bigint location_id FK "arc nullable"
-        bigint rack_id FK "arc nullable"
-        bigint equipment_id FK "arc nullable"
-        bigint connection_id FK "arc nullable"
-        text member_role "served_area|supply_edge|input_meter|it_load|facility_load"
+        bigint location_id FK
+        text member_role "served_area|..."
+    }
+    MS_RACK {
+        bigint scope_id FK
+        bigint rack_id FK
+        text member_role
+    }
+    MS_EQUIPMENT {
+        bigint scope_id FK
+        bigint equipment_id FK
+        text member_role "input_meter|it_load|facility_load"
+    }
+    MS_CONNECTION {
+        bigint scope_id FK
+        bigint connection_id FK
+        text member_role "supply_edge|..."
     }
 ```
 
 ```sql
-MEASUREMENT_SCOPE_MEMBER:
-CHECK ( num_nonnull(location_id, rack_id, equipment_id, connection_id) = 1 )
+-- 種別テーブル分割: テーブルごとに実 FK を持つ（排他アーク・num_nonnulls 不要）
+MS_LOCATION:   UNIQUE (scope_id, member_role, location_id)
+MS_RACK:       UNIQUE (scope_id, member_role, rack_id)
+MS_EQUIPMENT:  UNIQUE (scope_id, member_role, equipment_id)
+MS_CONNECTION: UNIQUE (scope_id, member_role, connection_id)
 
--- PG: 対象種別ごとの部分 UNIQUE。LCD では 09章の generated key 方式に置換する。
-UNIQUE (scope_id, member_role, location_id)  WHERE location_id IS NOT NULL
-UNIQUE (scope_id, member_role, rack_id)      WHERE rack_id IS NOT NULL
-UNIQUE (scope_id, member_role, equipment_id) WHERE equipment_id IS NOT NULL
-UNIQUE (scope_id, member_role, connection_id) WHERE connection_id IS NOT NULL
+-- 横断ビュー（任意）: 全メンバーを一覧する場合
+CREATE VIEW measurement_scope_member AS
+    SELECT scope_id, location_id, NULL::bigint AS rack_id,
+           NULL::bigint AS equipment_id, NULL::bigint AS connection_id, member_role
+      FROM ms_location
+    UNION ALL
+    SELECT scope_id, NULL, rack_id, NULL, NULL, member_role
+      FROM ms_rack
+    UNION ALL
+    SELECT scope_id, NULL, NULL, equipment_id, NULL, member_role
+      FROM ms_equipment
+    UNION ALL
+    SELECT scope_id, NULL, NULL, NULL, connection_id, member_role
+      FROM ms_connection;
 ```
 
-> 物理 room の集合だけを表すなら `location_id` メンバーだけで足りる。
-> 分電盤配下やテナント境界を正確に表す場合は、供給元 `equipment` や給電 `connection` もメンバーにできる。
+> 物理 room の集合だけを表すなら、`ms_location` テーブルのメンバーだけで足りる。
+> 分電盤配下やテナント境界を正確に表す場合は、供給元 equipment（`ms_equipment`）や給電 connection（`ms_connection`）もメンバーにできる。
 > `valid_from` / `valid_to` を持たせることで、過去の pPUE や再課金で「当時の境界」を再現できる。
 
 ### 候補生成（MV はここで使う）
@@ -109,7 +139,7 @@ flowchart LR
     RR --> PR["supply_area view<br/>(供給元 equipment → 給電先 area 集合)"]
     PR --> CAND["measurement_scope_candidate MV<br/>(境界候補)"]
     CAND --> SVC["サービス層<br/>採用・差分検証・versioning"]
-    SVC --> MS["MEASUREMENT_SCOPE / MEMBER<br/>(永続 ID)"]
+    SVC --> MS["MEASUREMENT_SCOPE / ms_*<br/>(永続 ID)"]
 ```
 
 ---
@@ -130,8 +160,8 @@ erDiagram
 
     METRIC {
         smallint id PK
-        text code UK "active_power|rack_inlet_temp|ppue"
-        text category "power|temperature|ratio ..."
+        text metric_name UK "active_power|rack_inlet_temp|ppue"
+        smallint category_id FK "power|temperature|ratio ..."
         text unit "kW|degC|"
         boolean is_derived "pPUE等(true)"
     }
@@ -156,8 +186,8 @@ erDiagram
         bigint series_id PK
         timestamptz time
         double value
-        text cur_status "ok|down|fault|disabled|stale"
-        text alert_state "normal|warning|critical"
+        text telemetry_status "ok|down|fault|disabled|stale"
+        text alert_level "normal|warning|critical"
     }
 ```
 
@@ -173,7 +203,7 @@ UNIQUE (measurement_scope_id, metric_id) WHERE series_kind='derived';
 
 > **整合ルール**: raw は機器由来なので `data_point_id` 必須。
 > pPUE のような派生値は `data_point_id` を持たず、`measurement_scope_id` と `metric_id` で意味が決まる。
-> `metric` に `code='ppue', category='ratio', unit='', is_derived=true` を1行足すだけで、
+> `metric` に `metric_name='ppue'`, `metric_category.category_name='ratio'`, `unit=''`, `is_derived=true` を1行足すだけで、
 > UI・最新値・ロールアップ・閾値評価は raw series と同じ枠組みを使える。
 
 ---
@@ -199,8 +229,8 @@ flowchart TB
 
 - **IT 入力**: スコープ内の IT 機器（`equip_kind.power_class='it'`）の `active_power` 合計。
 - **施設総入力**: スコープの `input_meter` / `supply_edge` に対応する入力電力合計（+ 必要なら冷却機）。
-- 電力点の特定は `series.metric_id` → `metric`（`code='active_power'`）で行う（[03章 L3](./03-finalists.md)）。
-- `measurement_scope_member.member_role` を使うと、分子・分母の対象をスコープ定義側で明示できる。
+- 電力点の特定は `series.metric_id` → `metric`（`metric_name='active_power'`）で行う（[03章 L3](./03-finalists.md)）。
+- `ms_*` テーブルの `member_role` を使うと、分子・分母の対象をスコープ定義側で明示できる。
 - 計算ジョブはサービス層で実行する。書き込み後は `current_value` / ロールアップ / 閾値評価を raw と同じ形で扱える。
 
 ---
@@ -210,7 +240,7 @@ flowchart TB
 | 種別 | 制約／留意点 | 実装・方針 |
 |------|------------|-----------|
 | 同一性 | 派生値の所属先 | MV ではなく `measurement_scope.id` に紐づける |
-| スコープ構成 | メンバーは location/rack/equipment/connection のいずれか1つ | `MEASUREMENT_SCOPE_MEMBER` の排他アーク |
+| スコープ構成 | メンバーは location/rack/equipment/connection | 種別テーブル分割（`ms_location` / `ms_rack` / `ms_equipment` / `ms_connection`） |
 | 整合 | raw/derived の形状 | `series` の CHECK（raw⇒data_point必須、derived⇒data_point NULL） |
 | 複合一意 | 派生系列の重複防止 | `(measurement_scope_id, metric_id) WHERE derived`（PG専用→LCD代替は [09章](./09-portability.md)） |
 | 導出 | スコープ候補 = トポロジ由来 | `measurement_scope_candidate` MV + サービス層差分適用 |
@@ -222,3 +252,6 @@ flowchart TB
 > - **MV に同一性を持たせない** — MV は候補生成、永続 ID は `measurement_scope`。
 > - **派生値も普通の series** — `series_id` 空間を共有し、`current_value`・ロールアップ・閾値評価が raw と同じ枠組みで効く。
 > - **data_point を歪めない** — 機器収集点は `data_point`、境界 KPI は `measurement_scope` + derived `series`。
+> - **equipment_group との棲み分け** — scope は KPI 算出の閉じた境界（`member_role`: `input_meter` / `it_load`）。
+>   group（[14 章](./14-logical-grouping.md)）は運用名（A系/B系）で機器・接続・ラックを束ねる汎用グループ。
+>   scope → group のオプション FK `equipment_group_id` で「対応するグループ」を緩く参照できる。

@@ -40,7 +40,7 @@
 3. **TSDB とメタデータを JOIN しない**（ClickHouse は越境 JOIN が苦手）。**`series_id`（整数）だけ越境**させ、
    ラベル・階層・属性の解決は常に RDBMS 側で行う。`series` 台帳が「点 ↔ 時系列の同一性」を保持する唯一の境界。
 4. **集約制約（予約≤定格・SPOF・容量超過・pPUE 算出・連結成分）はサービス層**で実施
-   （deferrable/トリガの方言差を避ける）。`location_closure`・占有U行・`measurement_scope_member`、および採用するなら
+   （deferrable/トリガの方言差を避ける）。`location_closure`・占有U行・`ms_*` テーブル（計測スコープメンバー）、および採用するなら
    （任意の）`equip_kind_closure` の維持も同様にサービス層。
 5. **PG 固有機能を論理モデルに使わない**（下記 LCD 代替）。
 
@@ -49,8 +49,8 @@
 
 > **参照モデルの単純化がそのまま LCD の単純化**: 旧案の汎用 `def`/`def_super`/`def_closure`（Haystack `is` の多重継承 DAG を
 > reify）を [03章](./03-finalists.md) は**廃止**し、オントロジを **`equip_kind` 単一親ツリー**（surrogate `smallint id` ＋
-> `code` UNIQUE・self-FK・読み多なら任意で `equip_kind_closure`）と **`metric` フラットカタログ**（`code` UNIQUE・
-> 単位を1行に保持）、固定集合の **CHECK enum** で表すよう改めた。
+> `equip_kind_name` UNIQUE・self-FK・読み多なら任意で `equip_kind_closure`）と **`metric` フラットカタログ**（`metric_name` UNIQUE・
+> 単位を1行に保持）、固定集合は **text PK の enum 参照表**で表すよう改めた。
 > 階層が要るのは実質 `equip_kind` だけで、これは**親参照ツリー（self-FK）**で持つ。後述するように、これは LCD ストーリーを
 > **明確に簡単にする**（DAG の閉包維持＝`path_count`・サイクル検査というサービス層の塊が丸ごと消える・9.3）。
 
@@ -68,8 +68,8 @@
 | **範囲型** | int4range/tstzrange | ✕ | **lower/upper の2列** + 比較。重なりは占有行で |
 | **配列** | text[] | ✕ | **明細テーブル** or JSON 配列 |
 | **部分索引 / 部分 UNIQUE**（`WHERE series_kind='derived'`） | ○ | **✕** | **生成列の NULL 一意 or 別表**（9.4・重要） |
-| 列挙 | CHECK IN / ENUM型 | CHECK IN / ENUM | **CHECK IN は両対応**。増えうる語彙は**型付き小マスタ**（`equip_kind`/`metric`・[03章](./03-finalists.md)） |
-| **正規表現 CHECK**（`code ~ '^[A-Za-z...]'`） | `~` | `REGEXP_LIKE` | **方言マップで吸収**（9.8） |
+| 列挙 | CHECK IN / ENUM型 | CHECK IN / ENUM | enum 参照表（`text` PK）または型付き小マスタで表す。`text CHECK` の列挙は使わない |
+| **識別子形式の検査**（`scope_key`/`group_key` 等） | `~` | `REGEXP_LIKE` | DB 方言差が出るため、基本はサービス層・アダプタ層で吸収 |
 | 生成列（`power_connection.available_power_w` 等） | ○ | ○(STORED・5.7+) | **そのまま**（範囲型の生成列だけ避ければ可・9.5） |
 | GIN(JSON) 索引 | ○ | ✕ | **生成列 + functional index**（両対応の形） |
 | 自動採番（`GENERATED ALWAYS AS IDENTITY`） | IDENTITY | AUTO_INCREMENT | 方言マップ(9.8) |
@@ -149,12 +149,13 @@ MySQL でも成立させる LCD 代替は次の 2 通り。
 2. **派生系列を別表に分離**: `derived_series` を切り出し、そこに素の `UNIQUE (measurement_scope_id, metric_id)` を張る。
    構造で部分性を表現（重なり禁止を占有行に落とすのと同じ発想）。`series_id` 空間は共有する。
 
-どちらも**部分索引という PG 固有機能を論理モデルから排除**できる。`threshold` や `capacity_budget` の排他アーク
-（9.5）で「特定 scope だけ一意」が要るときも同パターンで対応する。
+どちらも**部分索引という PG 固有機能を論理モデルから排除**できる。
+`threshold` は `series_id` 一意、容量定格は種別テーブル分割（`location_capacity` / `rack_capacity`）+
+`dimension_id` の型別 UNIQUE に寄せるため、部分 UNIQUE は不要になる。
 
 ---
 
-## 9.5 LCD 確認（metric・排他アーク・v_equip_flow・生成列・その他）
+## 9.5 LCD 確認（metric・種別テーブル分割・v_equip_flow・生成列・その他）
 
 確定設計が採用した構成は、いずれも**標準 SQL に収まり方言差を生まない**ことを個別に確認する。
 
@@ -162,11 +163,13 @@ MySQL でも成立させる LCD 代替は次の 2 通り。
   `metric_id` の単一 FK だけを参照する。旧来の「`point_type (quantity_id, unit_id) → quantity_unit` 複合 FK」は
   廃止済み（[03章 L3](./03-finalists.md)）。単位整合は **metric 行が単位を1つ保持**することで成立し、
   複合 FK の方言差・composite UNIQUE の維持も不要になる——標準の単一 FK で完結する。
-- **排他アーク FK（`CHECK num_nonnull(...)=1`）**: `capacity_budget`（location/rack）と `threshold`
-  （metric/equipment/location）はスコープを**排他アーク**で持つ（[03章 L7/L8](./03-finalists.md)）。
-  `num_nonnull` は標準 SQL 関数で PG/MySQL 両対応——参照整合は標準 CHECK で完全に担保できる。
-  ただし「排他アーク内の（scope_id × dimension）一意」など arc をまたぐ部分 UNIQUE が必要な場合は
-  **PG の部分索引**が必要になり、MySQL では生成列 NULL 一意（9.4 同パターン）で代替する。
+- **種別テーブル分割（横断参照）**: `eg_*`（equipment_group メンバー）、`ms_*`（measurement_scope メンバー）、
+  `location_capacity` / `rack_capacity` 等で複数テーブルの一つを指す箇所は、参照先の種別ごとに専用テーブルを分ける。
+  各テーブルが実 FK を持つため、`num_nonnulls` CHECK は不要になり、FK 整合性を DB が直接担保する。
+  型別 UNIQUE（`UNIQUE(group_id, equipment_id)` 等）で重複防止もそのまま効く。共通スーパーテーブルは不要。
+- **`threshold.series_id`**: 閾値は `current_value` と同じ `series_id` に直結する。
+  `UNIQUE(series_id)` だけで済み、metric/equipment/location の優先順位探索や部分 UNIQUE を評価時に持ち込まない。
+  既定値は series 作成時に `threshold_template` から具体行へ展開するサービス層の処理にする。
 - **`v_equip_flow`（導出フロー）**: 電力フローは `connection` / `power_connection` からの**導出ビュー**
   であり並行グラフを持たない（[03章 L6](./03-finalists.md)）。PG では**マテリアライズドビュー**（`REFRESH MATERIALIZED VIEW`）、
   MySQL では通常の**ビュー**か**テーブル＋バッチ更新ジョブ**で代替する——論理モデルの変更は不要。
@@ -177,8 +180,8 @@ MySQL でも成立させる LCD 代替は次の 2 通り。
 - **`connection` / breaker 相当の `equipment` 行 / 電力フロートレース**: いずれも**普通の表 + FK + UNIQUE + CHECK** で構成され、
   PG 固有機能は使っていない。`connection` 上の上流トレースは**標準の再帰 CTE**（MySQL 8.0+ 可）。
   breaker の盤内位置は `equipment(parent_equipment_id, panel_position)` の標準複合 UNIQUE で担保する。
-- **正規表現 CHECK**（`code ~ '^[A-Za-z][A-Za-z0-9_-]*$'` 等、`location.code`/`measurement_scope.code` に使用）: 演算子が
-  **PG `~` ↔ MySQL `REGEXP_LIKE(...)`** と異なるだけで、制約の意味は同一。**方言マップ（9.8）で機械的に吸収**する。
+- **識別子形式の検査**（`scope_key` / `group_key` / `local_label` 等）: 正規表現演算子は
+  **PG `~` ↔ MySQL `REGEXP_LIKE(...)`** と異なる。論理モデルでは DB 制約に寄せず、サービス層または DDL アダプタの任意検査として扱う。
 - **自動採番**: `GENERATED ALWAYS AS IDENTITY`（`bigint` PK のエンティティ）は MySQL では `BIGINT AUTO_INCREMENT`、
   小マスタの `smallint id` は `SMALLINT AUTO_INCREMENT`。いずれも既に方言マップ（9.8）に含まれる定番置換であることを
   **確認**した。
@@ -248,7 +251,7 @@ define_retention(table, keep)                              -- 保持（policy/TT
 | UPSERT | `INSERT ... ON CONFLICT DO UPDATE` | `INSERT ... ON DUPLICATE KEY UPDATE` | `ReplacingMergeTree`(マージ時) |
 | JSON 型 / 取得 | `jsonb` / `->>` | `JSON` / `->>`,`JSON_EXTRACT` | `String`+`JSONExtract` |
 | JSON 索引 | GIN | 生成列+INDEX | （分析側は不要） |
-| **正規表現 CHECK** | `col ~ '...'` | `REGEXP_LIKE(col, '...')` | — |
+| **識別子形式の任意検査** | `col ~ '...'` | `REGEXP_LIKE(col, '...')` | — |
 | **部分 UNIQUE** | `UNIQUE INDEX ... WHERE` | 生成列の NULL 一意（9.4） | — |
 | 生成列 | `GENERATED ALWAYS AS (...) STORED` | `GENERATED ALWAYS AS (...) STORED` | — |
 | boolean | `boolean` | `TINYINT(1)` | `UInt8` |
@@ -273,15 +276,18 @@ define_retention(table, keep)                              -- 保持（policy/TT
 ## 9.10 エンジンプロファイル（設定で宣言）
 
 ```sql
+CREATE TABLE rdbms_engine (rdbms_engine TEXT PRIMARY KEY); -- postgres, mysql
+CREATE TABLE tsdb_engine  (tsdb_engine  TEXT PRIMARY KEY); -- timescaledb, clickhouse
+
 CREATE TABLE engine_profile (         -- デプロイ1つにつき1行
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    rdbms text NOT NULL CHECK (rdbms IN ('postgres','mysql')),
-    tsdb  text NOT NULL CHECK (tsdb  IN ('timescaledb','clickhouse')),
+    rdbms_engine text NOT NULL REFERENCES rdbms_engine(rdbms_engine),
+    tsdb_engine  text NOT NULL REFERENCES tsdb_engine(tsdb_engine),
     enable_percentiles boolean NOT NULL DEFAULT false   -- p95 ティア列の有無
 );
 ```
 
-アダプタは起動時にこの値を見て、DDL 生成・UPSERT 構文・正規表現/部分 UNIQUE/ロールアップ実装を切り替える。
+アダプタは起動時にこの値を見て、DDL 生成・UPSERT 構文・識別子形式検査/部分 UNIQUE/ロールアップ実装を切り替える。
 
 ---
 
@@ -289,8 +295,8 @@ CREATE TABLE engine_profile (         -- デプロイ1つにつき1行
 
 | 区分 | 例 | 載せ替え時 |
 |---|---|---|
-| **不変（作り直し不要）** | リレーショナル表・ER・FK・UNIQUE・CHECK、排他アーク FK、metric 単位内包、親参照ツリーと閉包 JOIN、`connection` の再帰 CTE トレース、生成列（`available_power_w`）、Narrow の論理形、`series` 台帳、5操作の呼び出し側 | そのまま |
-| **アダプタ差し替え** | 方言DDL生成、UPSERT 構文、正規表現 CHECK 構文、部分 UNIQUE の表現（9.4）、`v_equip_flow` の matview⇄view/table+job、JSON 索引方式、ロールアップ DDL（CAGG⇄MV）、圧縮/保持（policy⇄TTL）、p95 実装 | アダプタ実装の置換 |
+| **不変（作り直し不要）** | リレーショナル表・ER・FK・UNIQUE・CHECK、種別テーブル分割（`eg_*` / `ms_*` / `location_capacity` / `rack_capacity`）、metric 単位内包、親参照ツリーと閉包 JOIN、`connection` の再帰 CTE トレース、生成列（`available_power_w`）、Narrow の論理形、`series` 台帳、5操作の呼び出し側 | そのまま |
+| **アダプタ差し替え** | 方言DDL生成、UPSERT 構文、識別子形式の任意検査、部分 UNIQUE の表現（9.4）、`v_equip_flow` の matview⇄view/table+job、JSON 索引方式、ロールアップ DDL（CAGG⇄MV）、圧縮/保持（policy⇄TTL）、p95 実装 | アダプタ実装の置換 |
 | **サービス層** | 集約制約（予約≤定格・SPOF・容量超過・ASHRAE 逸脱・pPUE 算出）、`location_closure`（および採用するなら任意の `equip_kind_closure`）・占有U行・`measurement_scope` 候補生成/維持 | DB 方言に依存しない実装 |
 
 > 旧案にあった「`def_closure` の path-count 維持・サイクル禁止検証」はサービス層から**消滅**した（DAG を廃止したため）。
@@ -304,8 +310,7 @@ CREATE TABLE engine_profile (         -- デプロイ1つにつき1行
   原子性は保てるが**行数は増える**（ラックは小さいので実害小）。閉包テーブル（`location_closure`/任意の
   `equip_kind_closure`）は**サブツリー移動・辺変更でエッジ再生成**が要る。
 - **部分 UNIQUE を生成列で代替**：9.4 の NULL 一意キーは動くが、derived 判定ロジックが生成列定義に焼き込まれ、
-  条件変更時に列定義の移行が要る（別表分離なら回避可・トレードオフ）。排他アーク上の arc またぎ部分 UNIQUE も
-  同パターンの制約を受ける。
+  条件変更時に列定義の移行が要る（別表分離なら回避可・トレードオフ）。
 - **集約制約が DB から出る**：サービス層に移すと、DB 直叩きの経路では強制されない。重要制約は
   ストアドではなく**単一の書き込み口（サービス）に集約**して担保する設計運用が前提。
 - **多重継承を将来入れるなら閉包の DAG 化が要る**：現状は `equip_kind` 単一親ツリーで `path_count` 不要だが、
@@ -317,8 +322,7 @@ CREATE TABLE engine_profile (         -- デプロイ1つにつき1行
 
 > まとめ: 確定設計 [03章](./03-finalists.md) は「Narrow + `series` 台帳 + メタ/TSDB 分離 + 越境JOINなし + 拡張は
 > timescaledb のみ」という**ポータブルな骨格**を持つ。本章の LCD 化（階層＝親参照＋任意の閉包
-> `location_closure`/`equip_kind_closure`、占有U行、metric 単位内包（単一 FK で完結）・排他アーク FK
-> （`CHECK num_nonnull(...)=1`・標準 SQL）・生成列の標準 SQL 化、
+> `location_closure`/`equip_kind_closure`、占有U行、metric 単位内包（単一 FK で完結）・種別テーブル分割（`eg_*` / `ms_*` / `location_capacity` / `rack_capacity`）・生成列の標準 SQL 化、
 > 部分 UNIQUE の生成列代替、sum+count、サービス層集約制約）で、
 > **PG+Timescale ⇄ MySQL+ClickHouse を アダプタ/方言/サービス層の差し替えだけ**で行き来できる。
 > なお汎用 `def` DAG を外したことで DAG 閉包維持の複雑さがサービス層から消え、移植性の骨格はむしろ

@@ -43,9 +43,9 @@
 > **出典**: [helpcenter.ecostruxureit.com/hc/en-us/articles/360038496693-Working-with-Rack-PDUs](https://helpcenter.ecostruxureit.com/hc/en-us/articles/360038496693-Working-with-Rack-PDUs)
 
 #### 設計への示唆
-`device_type`（Genome）→ `device`（実機）の2層分離は確認。さらに：
+`equipment_type`（Genome）→ `equipment`（実機）の2層分離は確認。さらに：
 - ローカルゲノムの概念は `device_type.source = 'library' | 'local'` フラグまたは `manufacturer IS NULL` で表現可能
-- rack PDU の outlet モデリング（v8.3〜）は `power_feed` の outlet 粒度（bank_id / outlet_num）を正当化する
+- rack PDU の outlet モデリング（v8.3〜）は `connection` + `power_connection` の outlet 粒度を正当化する
 
 ---
 
@@ -99,8 +99,8 @@
 > **出典**: [helpcenter.ecostruxureit.com/hc/en-us/articles/360038496693-Working-with-Rack-PDUs](https://helpcenter.ecostruxureit.com/hc/en-us/articles/360038496693-Working-with-Rack-PDUs)
 
 #### 設計への示唆
-- `redundancy_group`（L7）の `domain='power'`, `topology='2N'` + `redundancy_member.leg='A'|'B'` が Paired power consumers に直接対応
-- 「receptacle ごとのフェイルオーバー負荷」は L8 の `capacity_budget` + `redundancy_reserve` で表現可能
+- `redundancy_group`（L6）の `domain='power'`, `topology='2N'` + `redundancy_member.leg='A'|'B'` が Paired power consumers に直接対応
+- 「receptacle ごとのフェイルオーバー負荷」は L7 の `capacity_budget` + `redundancy_reserve` で表現可能
 
 ---
 
@@ -131,9 +131,9 @@ IT Advisor の機器（rack inventory）が持つプロパティグループ:
 > **出典**: [helpcenter.ecostruxureit.com/hc/en-us/articles/360037928494-Editing-rack-inventory](https://helpcenter.ecostruxureit.com/hc/en-us/articles/360037928494-Editing-rack-inventory)
 
 #### 設計への示唆
-- `Custom properties` → L10 `entity_tag`（登録語彙 FK 強制）に対応
-- `Customer` グループ → L2 `device.tenant_id` + L8 コロ属性（08章）
-- `Audit trail` → 変更管理（ITIL）はサービス層。DB には `device.updated_at` 程度で十分
+- `Custom properties` → カスタム属性（将来拡張候補）に対応
+- `Customer` グループ → L2 `equipment.tenant_id` + コロ属性（08章）
+- `Audit trail` → 変更管理（ITIL）はサービス層。DB には `equipment.updated_at` 程度で十分
 
 ---
 
@@ -177,7 +177,7 @@ IT Advisor の機器（rack inventory）が持つプロパティグループ:
 > **出典**: [help.ecostruxureit.com/display/public/UADCO8x/Understanding+estimated+load+and+how+it+is=calculated](https://help.ecostruxureit.com/display/public/UADCO8x/Understanding+estimated+load+and+how+it+is+calculated)
 
 #### 設計への示唆
-`device_demand.load_strategy` の4値（`nameplate | adjusted_nameplate | predicted | contracted`）は正しく、DCO のモデルに完全対応。`predicted` 戦略の入力ソース（DCE 実測値 / 外部統合）はL5 `conn` のプロトコル統合（DCE は SNMP/Modbus で集収）と繋がる。`predicted` の look-back 窓（90日）は L6 `measurement` の retention policy 設定と関係する。
+`equipment_demand.load_strategy` の4値（`nameplate | adjusted_nameplate | predicted | contracted`）は正しく、DCO のモデルに完全対応。`predicted` 戦略の入力ソース（DCE 実測値 / 外部統合）はL4 `data_point` のプロトコル統合（DCE は SNMP/Modbus で集収）と繋がる。`predicted` の look-back 窓（90日）は L5 `measurement` の retention policy 設定と関係する。
 
 ---
 
@@ -239,12 +239,12 @@ IT Advisor の機器（rack inventory）が持つプロパティグループ:
 
 | 設計要素（03章）| 調査結果 | 評価 |
 |---|---|---|
-| `device_type`（Genome）+ `device`（実機）の2層分離 | Genome Library → local genome → 配置という2段階テンプレートが確認 | ✅ 設計確認 |
-| `rack PDU bank/outlet` のモデリング（power_feed 粒度） | IT Advisor v8.3〜で Genome に bank/outlet 定義が追加されたと確認 | ✅ 裏取り済み |
+| `equipment_type`（Genome）+ `equipment`（実機）の2層分離 | Genome Library → local genome → 配置という2段階テンプレートが確認 | ✅ 設計確認 |
+| `rack PDU bank/outlet` のモデリング（connection + power_connection 粒度） | IT Advisor v8.3〜で Genome に bank/outlet 定義が追加されたと確認 | ✅ 裏取り済み |
 | 電力フロー = 物理 path からの導出（並行グラフ不要） | 電圧・相は上流接続から自動導出と確認 | ✅ 設計確認 |
 | `redundancy_group` の `paired power consumers` | コロケーション向け Paired power consumers テーブルを確認 | ✅ 設計確認 |
-| `device_demand.load_strategy` の4値 | nameplate / adjusted_nameplate / predicted（90日→30日）を確認 | ✅ 設計確認 |
+| `equipment_demand.load_strategy` の4値 | nameplate / adjusted_nameplate / predicted（90日→30日）を確認 | ✅ 設計確認 |
 | adjusted_nameplate の定義 | 実際の既知ピーク電力（≠ メーカー銘板）と確認 | ✅ 定義一致 |
-| `device` の `tenant_id` + Customer プロパティ | 機器に Customer グループ（コロ用）があると確認 | ✅ 裏取り済み |
+| `equipment` の `tenant_id` + Customer プロパティ | 機器に Customer グループ（コロ用）があると確認 | ✅ 裏取り済み |
 | WP-150 の 5 容量要素 / Stranded capacity | 検証エージェントが全 abstain（セッション上限）→ 確認不能 | ⚠ 要別途確認 |
 | 公開 REST API スキーマ（IT Expert / DCE） | 全ソースで抽出 0 件 → ドキュメントが認証壁の内側 | ❌ 取得不可 |

@@ -23,7 +23,7 @@ EMS/BMS/IT を横断し、将来の制御（設定値・指令）も視野に入
 erDiagram
     LOCATION ||--o{ RACK : contains
     RACK ||--o{ EQUIPMENT_PLACEMENT : holds
-    EQUIPMENT ||--o| EQUIPMENT_PLACEMENT : mounted
+    EQUIPMENT ||--o{ EQUIPMENT_PLACEMENT : "placed (Type-2)"
     EQUIPMENT_TYPE ||--o{ EQUIPMENT : instantiates
     EQUIPMENT ||--o{ DATA_POINT : "点(計測/制御)"
     METRIC ||--o{ DATA_POINT : "何を測るか"
@@ -35,7 +35,7 @@ erDiagram
 
     LOCATION {
         bigint id PK
-        text loc_type
+        smallint loc_type_id FK
     }
     RACK {
         bigint id PK
@@ -50,11 +50,11 @@ erDiagram
     }
     METRIC {
         smallint id PK
-        text code
+        text metric_name
     }
     DATA_POINT {
         bigint id PK
-        text role
+        text point_role
     }
     SERIES {
         bigint series_id PK
@@ -90,7 +90,7 @@ erDiagram
     LOCATION ||--o{ LOCATION : "parent (木)"
     LOCATION ||--o{ RACK : contains
     RACK ||--o{ EQUIPMENT_PLACEMENT : holds
-    EQUIPMENT ||--o| EQUIPMENT_PLACEMENT : "mounted (1機器=1搭載)"
+    EQUIPMENT ||--o{ EQUIPMENT_PLACEMENT : "placed (Type-2 履歴)"
     EQUIP_KIND ||--o{ EQUIPMENT_TYPE : classifies
     MANUFACTURER ||--o{ EQUIPMENT_TYPE : makes
     EQUIPMENT_TYPE ||--o{ EQUIPMENT : instantiates
@@ -99,7 +99,7 @@ erDiagram
     LOCATION {
         bigint id PK
         bigint parent_id FK
-        text loc_type "room|cage|row|..."
+        smallint loc_type_id FK "room|cage|row|..."
         bigint tenant_id FK
     }
     RACK {
@@ -109,12 +109,12 @@ erDiagram
     EQUIPMENT_PLACEMENT {
         bigint id PK
         int position
-        text face "front|rear"
+        text rack_face FK "front|rear"
     }
     EQUIP_KIND {
         smallint id PK
-        text code "ups|pdu|crah|server"
-        text power_class "it|cooling|facility"
+        text equip_kind_name "ups|pdu|crah|server"
+        text power_class FK "it|cooling|facility"
     }
     EQUIPMENT_TYPE {
         bigint id PK
@@ -154,16 +154,16 @@ erDiagram
 
     METRIC {
         smallint id PK
-        text code "active_power|rack_inlet_temp"
-        text category "power|temperature|..."
+        text metric_name "active_power|rack_inlet_temp"
+        smallint category_id FK
         text unit "kW|°C"
         boolean is_derived
     }
     DATA_POINT {
         bigint id PK
         smallint metric_id FK
-        text role "sensor|sp|cmd"
-        text phase "L1|L2|L3|none"
+        text point_role FK "sensor|sp|cmd"
+        text elec_phase FK "L1|L2|L3|none"
         boolean is_writable
         text protocol "bacnet|modbus|snmp|..."
         text uri "gateway/endpoint"
@@ -186,12 +186,12 @@ erDiagram
     CURRENT_VALUE {
         bigint series_id PK
         double value
-        text alert_state
+        text alert_level
     }
 ```
 
 **解説**：「何を測るか」は **`METRIC` という1つのフラットなカタログ**で表す。
-量・単位・型を1行に置き、`rack_inlet_temp` のように位置もコードへ織り込む。
+量・単位・型を1行に置き、`rack_inlet_temp` のように位置も `metric_name` へ織り込む。
 `DATA_POINT` は「その機器のその metric を、どの**役割**(sensor/設定値 sp/指令 cmd)で、どの相で取るか」を表す。
 取得アドレスは `DATA_POINT.protocol` / `uri` / `addr` で OID や register へマップする。
 
@@ -219,25 +219,25 @@ erDiagram
         bigint from_equipment_id FK
         bigint to_equipment_id FK
         smallint medium_id FK "elec|chilled_water|air"
-        text redundancy "A|B|N+1|2N|none"
+        text feed_label FK "A|B|N+1|2N|none"
     }
     POWER_CONNECTION {
         bigint connection_id PK "FK(共有PK)"
         numeric voltage_v
-        text phase
+        text phase_config FK
         numeric rated_a
         bigint available_power_w "生成列 VxAxutilx√3"
     }
     REDUNDANCY_GROUP {
         bigint id PK
-        text domain "power|cooling|network"
-        text topology "N+1|2N|..."
+        text infra_domain FK "power|cooling|network"
+        text redundancy_topology FK "N+1|2N|..."
         int n_required
     }
     REDUNDANCY_MEMBER {
         bigint group_id PK
         bigint equipment_id PK
-        text leg "A|B|C|none"
+        text feed_leg FK "A|B|C|none"
     }
 ```
 
@@ -249,7 +249,7 @@ breaker は専用表を作らず、`equip_kind='breaker'` の `EQUIPMENT` 行と
 「どの機器がどの機器に給電/冷却するか」の多段トレースは、この `CONNECTION` グラフを辿る
 **導出ビュー `v_equip_flow`**で得る。手で別グラフを持たない。
 冷却も同じ `CONNECTION`（medium=chilled_water/air）で表す（将来 `cooling_connection` サブタイプ）。
-**冗長は `REDUNDANCY_GROUP` ＋メンバーで「意図」を一級に持つ**：N+1/2N とメンバー（A系/B系の `leg`）を宣言し、
+**冗長は `REDUNDANCY_GROUP` ＋メンバーで「意図」を一級に持つ**：N+1/2N とメンバー（A系/B系の `feed_leg`）を宣言し、
 「2N の A/B が本当に独立電源か（SPOF 検出）」「N+1 で1台落ちても容量が足りるか」を、
 **物理（v_equip_flow/容量）と突き合わせて検証**する。
 
@@ -260,12 +260,20 @@ breaker は専用表を作らず、`equip_kind='breaker'` の `EQUIPMENT` 行と
 ```mermaid
 erDiagram
     EQUIPMENT ||--o{ EQUIPMENT_DEMAND : "需要(銘板/契約/予約)"
-    CAPACITY_BUDGET }o--|| RACK : "定格(排他アーク)"
-    METRIC ||--o{ THRESHOLD : "閾値"
+    LOCATION ||--o{ LOCATION_CAPACITY : "budget"
+    RACK ||--o{ RACK_CAPACITY : "budget"
+    SERIES ||--o| THRESHOLD : "rules"
     TENANT ||--o{ SPACE_LEASE : "賃貸(コロ)"
 
-    CAPACITY_BUDGET {
+    LOCATION_CAPACITY {
         bigint id PK
+        bigint location_id FK
+        text dimension "power_w|cooling_w"
+        numeric rated
+    }
+    RACK_CAPACITY {
+        bigint id PK
+        bigint rack_id FK
         text dimension "power_w|space_u|cooling_w"
         numeric rated
     }
@@ -276,6 +284,7 @@ erDiagram
     }
     THRESHOLD {
         bigint id PK
+        bigint series_id FK
         numeric warn_high
         numeric crit_high
         numeric hysteresis
@@ -287,12 +296,76 @@ erDiagram
 ```
 
 **解説**：容量は WP-150 の5要素（空間/電力/電力分配/冷却/冷却分配）＋重量/ポートを、
-`CAPACITY_BUDGET`(定格) と `EQUIPMENT_DEMAND`(需要) で持つ。
+種別テーブル分割（`LOCATION_CAPACITY` / `RACK_CAPACITY`）(定格) と `EQUIPMENT_DEMAND`(需要) で持つ。
 需要は推定負荷戦略（銘板/予測/コロ契約）で評価し、**stranded = 予約 − 実測**（死蔵容量）を出す。
 
-監視は `THRESHOLD`（severity と hysteresis）。
+監視は `THRESHOLD`（series ごとの warn/crit と hysteresis）。
 テナント/コロは加算モジュールとして扱う（cage 境界・契約電力・賃貸 `SPACE_LEASE`・[08章](./08-tenancy-colocation.md)）。
-`CAPACITY_BUDGET`/`THRESHOLD` のスコープは多態キーでなく**排他アーク FK**（対象ごとに NOT NULL FK＋「ちょうど1つ」）で参照整合を保つ。
+容量のスコープは種別テーブル分割（`LOCATION_CAPACITY` / `RACK_CAPACITY`）で表す。スコープごとに専用テーブルを持ち、FK 整合性を DB が担保する。`THRESHOLD` は `series_id` に直結する。
+`target_type + target_id` 型の多態キーは使わない。
+
+---
+
+## 6. 論理グルーピング（A系/B系を名前で束ねる）
+
+```mermaid
+erDiagram
+    TENANT ||--o{ EQUIPMENT_GROUP : owns
+    EQUIPMENT_GROUP ||--o{ EQUIPMENT_GROUP : "parent (tree)"
+    EQUIPMENT_GROUP ||--o{ EG_EQUIPMENT : members
+    EQUIPMENT_GROUP ||--o{ EG_CONNECTION : members
+    EQUIPMENT_GROUP ||--o{ EG_RACK : members
+    EQUIPMENT_GROUP ||--o{ EG_LOCATION : members
+    EQUIPMENT ||--o{ EG_EQUIPMENT : belongs
+    CONNECTION ||--o{ EG_CONNECTION : belongs
+    RACK ||--o{ EG_RACK : belongs
+    LOCATION ||--o{ EG_LOCATION : belongs
+    MEASUREMENT_SCOPE }o--o| EQUIPMENT_GROUP : "optional cross-ref"
+
+    EQUIPMENT_GROUP {
+        bigint id PK
+        bigint tenant_id FK "nullable"
+        text group_key UK "sys-a"
+        text name "A系"
+        text group_kind FK "power_chain|cooling_loop|..."
+    }
+    EG_EQUIPMENT {
+        bigint group_id FK
+        bigint equipment_id FK
+        int ordinal
+        text member_role
+    }
+    EG_CONNECTION {
+        bigint group_id FK
+        bigint connection_id FK
+        int ordinal
+        text member_role
+    }
+    EG_RACK {
+        bigint group_id FK
+        bigint rack_id FK
+        int ordinal
+        text member_role
+    }
+    EG_LOCATION {
+        bigint group_id FK
+        bigint location_id FK
+        int ordinal
+        text member_role
+    }
+```
+
+**解説**：「A系」「北棟冷却ループ」のように、物理階層（location 木）にも冗長意図（redundancy_group）にも
+KPI 境界（measurement_scope）にも収まらない**運用上の名前付きグループ**を表す。
+メンバーは種別テーブル分割（`EG_EQUIPMENT` / `EG_CONNECTION` / `EG_RACK` / `EG_LOCATION`）で持つ。
+種別ごとに専用テーブルを分けることで、FK 整合性を DB が担保する。
+connection を含めることで、パワーチェーンのボトルネック分析（`MIN(available_power_w)`）や
+A/B 合流点（STS）での正確な系統分離が可能になる。
+
+`measurement_scope`（10 章）は KPI 算出の閉じた境界で、`member_role` 語彙（`input_meter` / `it_load`）や
+ライフサイクル（`valid_from`/`valid_to`）が異なるため別テーブル。
+scope → group のオプション FK で「このスコープはこのグループに対応する」を緩く結ぶ。
+詳細は [14 章](./14-logical-grouping.md)。
 
 ---
 
@@ -300,11 +373,13 @@ erDiagram
 
 | 判断 | 採用 | 一言 |
 |---|---|---|
-| 点の定義 | **`metric` フラットカタログ** | 量・単位・型を1行。位置はコードに織り込む（〜100 行で爆発しない） |
-| 役割 | **`data_point.role`** | 制御を見据え、sensor/sp/cmd を点の属性に |
+| 点の定義 | **`metric` フラットカタログ** | 量・単位・型を1行。位置は `metric_name` に織り込む（〜100 行で爆発しない） |
+| 役割 | **`data_point.point_role`** | 制御を見据え、sensor/sp/cmd を点の属性に |
 | 接続 | **物理 connection＝真実源、フローは導出** | 並行する別グラフを持たない |
 | 冗長 | **`redundancy_group` + member** | 意図(N+1/2N)を持ち、SPOF/容量で物理を検証 |
-| スコープ参照 | **排他アーク FK** | 多態キー（type+id）をやめ参照整合を DB に残す（固定3対象） |
+| 横断参照 | **種別テーブル分割** | 多態キー（type+id）をやめ、参照先の種別ごとに専用テーブルを分けて FK 整合性を担保する |
+| 閾値 | **`threshold.series_id`** | 評価対象の `current_value.series_id` に直結し、既定値は series 作成時に展開 |
+| 論理グルーピング | **equipment_group（14章）** | 運用上の名前付きグループ。measurement_scope / redundancy_group とは別概念・別テーブル |
 | 階層 | **閉包テーブル / 親参照ツリー** | `ltree`/拡張に依存しない（移植可・[09章](./09-portability.md)） |
 
 ## ドキュメントの歩き方
@@ -312,17 +387,20 @@ erDiagram
 | 章 | 内容 |
 |---|---|
 | [01](./01-research-and-domain.md) | ドメイン知識＋参照モデル調査（EcoStruxure/Haystack/NetBox）＋ reify パターン |
-| [03](./03-finalists.md) | **確定設計（L1〜L8 の ER＋全体俯瞰＋制約）**（必読） |
+| [03](./03-finalists.md) | **確定設計（L1〜L9 の ER＋全体俯瞰＋制約）**（必読） |
 | [04](./04-validation-queries.md) | 代表ユースケースの検証 SQL |
 | [08](./08-tenancy-colocation.md) | テナント/コロ拡張 |
 | [09](./09-portability.md) | ポータビリティ（LCD・別エンジン移植） |
 | [10](./10-measurement-scope-derived-metrics.md) | 計測スコープ & 派生メトリクス（pPUE） |
 | [11](./11-standards-gap-analysis.md) | 標準・法規ギャップ分析 |
+| [12](./12-ecostruxure-schema-research.md) | EcoStruxure IT スキーマ調査 |
+| [13](./13-raw-vs-derived-telemetry.md) | raw / derived テレメトリの区別 |
+| [14](./14-logical-grouping.md) | 論理グルーピング（A系/B系・冷却ループ等） |
 
 ## レビューで特に見てほしい点
 
-1. **`metric` カタログの粒度** — 位置/相をコードに織り込む方針で、横断クエリが `category` ＋命名で足りるか。
-2. **A/B 系の持ち方** — 導出を真実源とし、多用時に `equipment.power_side` を非正規化する案で良いか。
+1. **`metric` カタログの粒度** — 位置/相を `metric_name` に織り込む方針で、横断クエリが `metric_category` ＋命名で足りるか。
+2. **A/B 系の持ち方** — `connection` グラフからの導出（v_equip_flow）に加え、運用名は `equipment_group`（14章）で持つ。集計・ボトルネック分析・保守計画に使う。
 3. **`redundancy_group` の検証** — 2N 独立性・N+1 容量充足をどこまで自動検証するか。
-4. **排他アーク化の範囲** — threshold/capacity_budget 以外に多態キー（type+id）が残っていないか。カスタム属性層（旧 entity_tag）は不採用。
+4. **横断参照の範囲** — equipment/connection/rack/location を指す箇所が種別テーブル分割で統一されているか。カスタム属性層（旧 entity_tag）は不採用。
 5. **制御（writable）の作り込み度** — 今は `is_writable` フラグで拡張点だけを用意している。優先配列・write 監査は本実装段階で決める。
